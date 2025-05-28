@@ -1,0 +1,11 @@
+[target.'cfg(all(target_arch = "arm", target_os = "none"))']
+# pick one of the following options by uncommenting it
+# runner = "elf2uf2-rs -d" #and then flash manually
+# runner = "picotool load -u -v -x -t elf"
+runner = "probe-rs run --chip RP235x --protocol swd --speed 16000 --probe 2e8a:000c:E6633861A3543E38" #remove the --probe option if you have only one probe attached
+
+[build]
+target = "thumbv8m.main-none-eabihf"
+
+[env]
+DEFMT_LOG = "debug"
