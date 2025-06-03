@@ -1,6 +1,3 @@
-#![no_std]
-#![no_main]
-
 use aht20_async::Aht20;
 use defmt::{Debug2Format, info};
 use defmt_rtt as _;
@@ -12,7 +9,7 @@ use embassy_rp::{
     config::Config,
     gpio::{Input, Pull},
     i2c::{Async, Config as I2cConfig, I2c, InterruptHandler},
-    peripherals::{I2C0, PIN_18},
+    peripherals::I2C0,
 };
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
 use embassy_time::{Delay, Timer};
@@ -23,40 +20,22 @@ use ens160_aq::{
 use panic_probe as _;
 use static_cell::StaticCell;
 
-// Firmware image type for bootloader
-#[unsafe(link_section = ".start_block")]
-#[used]
-pub static IMAGE_DEF: ImageDef = ImageDef::secure_exe();
-
-bind_interrupts!(struct Irqs {
-        I2C0_IRQ => InterruptHandler<I2C0>;
-    }
-);
-
-#[embassy_executor::main]
-async fn main(_spawner: Spawner) {
-    let p = embassy_rp::init(Config::default());
-
-    // I2C setup
-    let sda = p.PIN_16;
-    let scl = p.PIN_17;
-    let i2c0 = p.I2C0;
-    let i2c = I2c::new_async(i2c0, scl, sda, Irqs, I2cConfig::default());
-    static I2C_BUS: StaticCell<Mutex<NoopRawMutex, I2c<'static, I2C0, Async>>> = StaticCell::new();
-    let i2c_bus = I2C_BUS.init(Mutex::new(i2c));
-    let i2c_device_aht21 = I2cDevice::new(i2c_bus);
-    let i2c_device_ens160 = I2cDevice::new(i2c_bus);
-
+#[embassy_executor::task]
+pub async fn sensor_task(
+    aht21: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>,
+    ens160: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>,
+    mut ens160_int: Input<'static>,
+) {
     // Initialize AHT20 and calibrate it
-    let mut aht21 = Aht20::new(i2c_device_aht21, Delay).await.unwrap();
+    let mut aht21 = Aht20::new(aht21, Delay).await.unwrap();
     info!("calibrate aht21");
     let _ = aht21.calibrate().await.unwrap();
     Timer::after_millis(5000).await;
     info!("done calibrating");
 
     // Initialize ENS160
-    let mut ens160 = Ens160::new(i2c_device_ens160, Delay);
-    let mut ens160_int = Input::new(p.PIN_18, Pull::Up);
+    let mut ens160 = Ens160::new(ens160, Delay);
+    ens160.set_operation_mode(OperationMode::Standard).await.unwrap();
 
     // In the loop, we read the AHT20 sensor and then use the ENS160 to get air quality data.
     loop {
@@ -75,7 +54,6 @@ async fn main(_spawner: Spawner) {
                 }
             };
             // ens160.clear_command().await.unwrap();
-            ens160.set_operation_mode(OperationMode::Standard).await.unwrap();
 
             let mut status = ens160.get_status().await.unwrap();
             while !matches!(status.validity_flag(), ValidityFlag::NormalOperation) {
@@ -125,8 +103,8 @@ async fn main(_spawner: Spawner) {
                 eco2.get_value(),
                 h,
             );
-            ens160.set_operation_mode(OperationMode::Sleep).await.unwrap();
-        } // drop ens160, but keep i2c_bus
+            // ens160.set_operation_mode(OperationMode::Sleep).await.unwrap();
+        }
 
         Timer::after_secs(10).await;
     }
