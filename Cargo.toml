@@ -48,6 +48,11 @@ panic-probe = { version = "1.0.0", features = ["print-defmt"] }
 ens160-aq = { version = "0.2.10", features = ["async"] }
 aht20-async = "1.0.0"
 static_cell = "2.1.0"
+moving_median = "0.3.0"
+heapless = "0.8.0"
+embedded-graphics = "0.8.1"
+ssd1306-async = { git = "https://github.com/kalkyl/ssd1306-async" }
+tinybmp = "0.6.0"
 
 # patch embassy to use the latest version of embassy-rp, which is not yet released.cargo build
 [patch.crates-io]

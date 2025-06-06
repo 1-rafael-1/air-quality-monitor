@@ -1,12 +1,11 @@
 #![no_std]
 #![no_main]
 
-use aht20_async::Aht20;
-use defmt::{Debug2Format, info};
 use defmt_rtt as _;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_rp::{
+    adc::{Adc, Channel, Config as AdcConfig, InterruptHandler as AdcInterruptHandler},
     bind_interrupts,
     block::ImageDef,
     config::Config,
@@ -15,16 +14,15 @@ use embassy_rp::{
     peripherals::I2C0,
 };
 use embassy_sync::{blocking_mutex::raw::NoopRawMutex, mutex::Mutex};
-use embassy_time::{Delay, Timer};
-use ens160_aq::{
-    Ens160,
-    data::{InterruptPinConfig, OperationMode, ValidityFlag},
-};
 use panic_probe as _;
 use static_cell::StaticCell;
 
 mod display;
+mod event;
+mod orchestrate;
 mod sensor;
+mod vbus;
+mod vsys;
 mod watchdog;
 
 // Firmware image type for bootloader
@@ -34,6 +32,7 @@ pub static IMAGE_DEF: ImageDef = ImageDef::secure_exe();
 
 bind_interrupts!(struct Irqs {
         I2C0_IRQ => InterruptHandler<I2C0>;
+        ADC_IRQ_FIFO => AdcInterruptHandler;
     }
 );
 
@@ -55,10 +54,21 @@ async fn main(spawner: Spawner) {
     let i2c_device_ssd1306 = I2cDevice::new(i2c_bus);
 
     // Initialize the interrupt pin for ENS160
-    let mut ens160_int = Input::new(p.PIN_18, Pull::Up);
+    let ens160_int = Input::new(p.PIN_18, Pull::Up);
+
+    // Initialize VBUS monitoring
+    let vbus = Input::new(p.PIN_24, Pull::None);
+
+    // Initialize VSYS voltage monitoring
+    let adc = Adc::new(p.ADC, Irqs, AdcConfig::default());
+    let channel = Channel::new_pin(p.PIN_29, Pull::None);
 
     spawner
         .spawn(sensor::sensor_task(i2c_device_aht21, i2c_device_ens160, ens160_int))
         .unwrap();
     spawner.spawn(display::display_task(i2c_device_ssd1306)).unwrap();
+    spawner.spawn(watchdog::watchdog_task(p.WATCHDOG)).unwrap();
+    spawner.spawn(orchestrate::orchestrate_task()).unwrap();
+    spawner.spawn(vbus::vbus_monitor_task(vbus)).unwrap();
+    spawner.spawn(vsys::vsys_voltage_task(adc, channel)).unwrap();
 }
