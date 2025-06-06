@@ -16,7 +16,10 @@ use ens160_aq::{
 use moving_median::MovingMedian;
 use panic_probe as _;
 
-use crate::event::{Event, send_event};
+use crate::{
+    event::{Event, send_event},
+    watchdog::trigger_watchdog_reset,
+};
 
 async fn initialize_aht21(
     aht21_device: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>,
@@ -99,7 +102,8 @@ pub async fn sensor_task(
     let mut aht21 = match initialize_aht21(aht21).await {
         Some(sensor) => sensor,
         None => {
-            info!("Failed to initialize AHT21");
+            info!("Failed to initialize AHT21 - triggering system reset");
+            trigger_watchdog_reset();
             return;
         }
     };
@@ -107,11 +111,23 @@ pub async fn sensor_task(
     // Initialize ENS160
     let mut ens160 = Ens160::new(ens160, Delay);
 
+    // Test ENS160 initialization once before entering the loop
+    if let Err(e) = ens160.initialize().await {
+        info!(
+            "Failed to initialize ENS160: {} - triggering system reset",
+            Debug2Format(&e)
+        );
+        trigger_watchdog_reset();
+        return;
+    }
+
     // define moving median for eCO2 and Ethanol
     let mut eco2_median = MovingMedian::<f32, 5>::new();
     let mut etoh_median = MovingMedian::<f32, 5>::new();
 
-    // In the loop, we read the AHT20 sensor and then use the ENS160 to get air quality data.
+    info!("Sensor task initialized successfully");
+
+    // In the loop, we read the sensors and handle all errors gracefully
     loop {
         match read_sensor_data(&mut aht21, &mut ens160, &mut eco2_median, &mut etoh_median).await {
             Ok(readings) => {
@@ -126,7 +142,8 @@ pub async fn sensor_task(
                 .await;
             }
             Err(e) => {
-                info!("Sensor reading failed: {}", e);
+                info!("Sensor reading failed (continuing): {}", e);
+                // Continue in the loop - all errors in the loop are considered transient
             }
         }
 

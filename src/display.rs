@@ -1,7 +1,7 @@
 // use defmt_rtt as _;
 use core::fmt::Write;
 
-use defmt::{Debug2Format, error};
+use defmt::{Debug2Format, error, info};
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_rp::{
     i2c::{Async, I2c},
@@ -26,6 +26,8 @@ use heapless::String;
 use panic_probe as _;
 use ssd1306_async::{I2CDisplayInterface, Ssd1306, prelude::*};
 use tinybmp::Bmp;
+
+use crate::watchdog::trigger_watchdog_reset;
 
 /// Wrapper for ValidityFlag to add PartialEq
 #[derive(Debug, Copy, Clone)]
@@ -81,36 +83,44 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
     let interface = I2CDisplayInterface::new(i2c_device);
     let mut display =
         Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0).into_buffered_graphics_mode();
-    match display.init().await {
-        Ok(_) => {}
-        Err(e) => {
-            error!("Failed to initialize display: {}", Debug2Format(&e));
-            return;
-        }
+
+    // Critical initialization - if this fails, we need to reset
+    if let Err(e) = display.init().await {
+        error!(
+            "Failed to initialize display: {} - triggering system reset",
+            Debug2Format(&e)
+        );
+        trigger_watchdog_reset();
+        return;
     }
 
-    match display.set_brightness(Brightness::DIMMEST).await {
-        Ok(_) => {}
-        Err(e) => {
-            error!("Failed to set display brightness: {}", Debug2Format(&e));
-            return; // ToDo: Handle error
-        }
+    if let Err(e) = display.set_brightness(Brightness::DIMMEST).await {
+        error!(
+            "Failed to set display brightness: {} - triggering system reset",
+            Debug2Format(&e)
+        );
+        trigger_watchdog_reset();
+        return;
     }
 
-    // Clear the display
+    // Clear the display - this is still critical initialization
     display.clear();
-    match display.flush().await {
-        Ok(_) => {}
-        Err(e) => {
-            error!("Failed to flush display: {}", Debug2Format(&e));
-            // but we continue to run the display task, hoping it will recover
-        }
+    if let Err(e) = display.flush().await {
+        error!(
+            "Failed to initial display flush: {} - triggering system reset",
+            Debug2Format(&e)
+        );
+        trigger_watchdog_reset();
+        return;
     }
 
     // Create settings for the display
     let settings = Settings::new();
     let mut state = DisplayState::new();
 
+    info!("Display task initialized successfully");
+
+    // Main display loop - all errors here are considered transient
     loop {
         let command = wait_for_display_command().await;
 
@@ -198,16 +208,15 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
             }
         }
 
+        // Draw battery icon
         let battery_icon = settings.get_battery_icon(state.get_battery_level());
         let bat_image = Image::new(battery_icon, settings.bat_position);
         bat_image.draw(&mut display.color_converted()).unwrap();
 
-        match display.flush().await {
-            Ok(_) => {}
-            Err(e) => {
-                error!("Failed to flush display: {}", Debug2Format(&e));
-                continue;
-            }
+        // Flush display - if this fails, it's transient, so we continue
+        if let Err(e) = display.flush().await {
+            error!("Failed to flush display (continuing): {}", Debug2Format(&e));
+            continue;
         }
     }
 }

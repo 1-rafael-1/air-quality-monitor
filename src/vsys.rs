@@ -1,3 +1,4 @@
+use defmt::info;
 use embassy_futures::select::{Either, select};
 use embassy_rp::adc::{Adc, Async, Channel};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
@@ -27,6 +28,8 @@ pub enum VsysCommand {
 #[embassy_executor::task]
 pub async fn vsys_voltage_task(mut adc: Adc<'static, Async>, mut channel: Channel<'static>) {
     let mut voltage_median = MovingMedian::<f32, 5>::new();
+
+    info!("VSYS voltage task initialized successfully");
 
     loop {
         match select(wait_for_vsys_command(), Timer::after(Duration::from_secs(300))).await {
