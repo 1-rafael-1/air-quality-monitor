@@ -1,3 +1,5 @@
+//! The main orchestrator task for the system
+
 use crate::{
     display::{DisplayCommand, send_display_command},
     event::{Event, receive_event},
@@ -9,11 +11,12 @@ use crate::{
 pub async fn orchestrate_task() {
     loop {
         let event = receive_event().await;
-        process_event(event).await;
+        process_event(event);
     }
 }
 
-async fn process_event(event: Event) {
+/// Processes the received event and sends appropriate commands to other components
+fn process_event(event: Event) {
     match event {
         Event::SensorData {
             temperature,
@@ -23,7 +26,7 @@ async fn process_event(event: Event) {
             air_quality,
             ens160_validity,
         } => {
-            send_display_command(DisplayCommand::UpdateSensorData {
+            send_display_command(DisplayCommand::SensorData {
                 temperature,
                 humidity,
                 co2,
@@ -33,7 +36,7 @@ async fn process_event(event: Event) {
             });
         }
         Event::BatteryCharging(is_charging) => {
-            send_display_command(DisplayCommand::UpdateBatteryCharging(is_charging));
+            send_display_command(DisplayCommand::BatteryCharging(is_charging));
             if !is_charging {
                 send_vsys_command(VsysCommand::MakeMeasurement);
             }

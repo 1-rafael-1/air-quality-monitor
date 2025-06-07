@@ -1,7 +1,14 @@
 [package]
-name = "ens160-aht21-tester"
+readme = "An air quality monitor using the ENS160 AQ sensor and AHT20 temperature/humidity sensor, with a display."
+name = "air-quality-monitor"
+authors = ["rafael <rafael.koch@gmx.net>"]
+description = "An air quality monitor using the ENS160 AQ sensor and AHT20 temperature/humidity sensor, with a display."
 version = "0.1.0"
 edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/1-rafael-1/air-quality-monitor"
+keywords = ["ens160", "aht21", "air quality", "monitor"]
+categories = ["embedded", "no-std", "async"]
 
 [profile.dev]
 lto = true
@@ -61,3 +68,24 @@ embassy-executor = { git = "https://github.com/embassy-rs/embassy", branch = "ma
 embassy-time = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 embassy-sync = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy", branch = "main" }
+
+
+[lints.clippy]
+# Enable all main clippy lints (with lower priority so individual lints can override)
+all = { level = "warn", priority = 1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+
+# Deny specific lints (treat as errors) - these have priority 0 and will override the groups above
+unwrap_used = "deny"
+expect_used = "deny"
+
+# Warn on specific lints
+panic = "warn"
+missing_docs_in_private_items = "warn"
+cargo_common_metadata = "warn"
+
+# Allow specific lints
+future_not_send = "allow" # embassy tasks are not Send
+multiple_crate_versions = "allow" # not worth the effort, we get a minimal binary size increase that does not matter here 

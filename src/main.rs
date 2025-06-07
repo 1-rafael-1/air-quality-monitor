@@ -1,3 +1,7 @@
+//! RP2350 based air quality monitor firmware
+//!
+//! Uses ens160 for air quality, AHT21 for temperature and humidity, and SSD1306 for display.
+
 #![no_std]
 #![no_main]
 
@@ -8,6 +12,7 @@ use embassy_rp::{
     adc::{Adc, Channel, Config as AdcConfig, InterruptHandler as AdcInterruptHandler},
     bind_interrupts,
     block::ImageDef,
+    clocks::ClockConfig,
     config::Config,
     gpio::{Input, Pull},
     i2c::{Async, Config as I2cConfig, I2c, InterruptHandler},
@@ -38,7 +43,9 @@ bind_interrupts!(struct Irqs {
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
-    let p = embassy_rp::init(Config::default());
+    #[allow(clippy::unwrap_used)]
+    // Using the system clock at 12 MHz to conserve power
+    let p = embassy_rp::init(Config::new(ClockConfig::system_freq(12_000_000).unwrap()));
 
     // I2C setup
     let sda = p.PIN_16;
@@ -63,12 +70,18 @@ async fn main(spawner: Spawner) {
     let adc = Adc::new(p.ADC, Irqs, AdcConfig::default());
     let channel = Channel::new_pin(p.PIN_29, Pull::None);
 
+    #[allow(clippy::unwrap_used)]
     spawner
         .spawn(sensor::sensor_task(i2c_device_aht21, i2c_device_ens160, ens160_int))
         .unwrap();
+    #[allow(clippy::unwrap_used)]
     spawner.spawn(display::display_task(i2c_device_ssd1306)).unwrap();
+    #[allow(clippy::unwrap_used)]
     spawner.spawn(watchdog::watchdog_task(p.WATCHDOG)).unwrap();
+    #[allow(clippy::unwrap_used)]
     spawner.spawn(orchestrate::orchestrate_task()).unwrap();
+    #[allow(clippy::unwrap_used)]
     spawner.spawn(vbus::vbus_monitor_task(vbus)).unwrap();
+    #[allow(clippy::unwrap_used)]
     spawner.spawn(vsys::vsys_voltage_task(adc, channel)).unwrap();
 }

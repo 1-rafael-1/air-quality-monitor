@@ -1,9 +1,12 @@
+//! Watchdog task to reset the system if it stops being fed
 use defmt::info;
 use embassy_rp::{Peri, peripherals::WATCHDOG, watchdog::Watchdog};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Timer};
 
+/// How long the watchdog will wait before resetting the system
 const WATCHDOG_TIMEOUT: Duration = Duration::from_millis(10000);
+/// How often the watchdog should be fed to prevent a reset
 const WATCHDOG_FEED_INTERVAL: Duration = Duration::from_millis(1000);
 
 /// Signal to stop feeding the watchdog (causes system reset)
@@ -25,7 +28,7 @@ pub async fn watchdog_task(wd: Peri<'static, WATCHDOG>) {
 
     loop {
         // Check if we should stop feeding the watchdog
-        if WATCHDOG_STOP.try_take().is_some() {
+        if WATCHDOG_STOP.signaled() {
             info!("Watchdog stop signal received - system will reset");
             // Stop feeding the watchdog, which will cause a reset after the timeout
             break;

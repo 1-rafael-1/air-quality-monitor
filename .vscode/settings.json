@@ -26,6 +26,7 @@
     "rust-analyzer.lens.references.enumVariant.enable": true,
     "rust-analyzer.lens.references.method.enable": true,
     "rust-analyzer.lens.references.trait.enable": true,
+    "rust-analyzer.check.command": "clippy",
     "errorLens.enabledDiagnosticLevels": [
         "error",
         "info",
