@@ -9,12 +9,12 @@ use defmt_rtt as _;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
 use embassy_rp::{
-    adc::{Adc, Channel, Config as AdcConfig, InterruptHandler as AdcInterruptHandler},
+    adc::InterruptHandler as AdcInterruptHandler,
     bind_interrupts,
     block::ImageDef,
-    clocks::ClockConfig,
+    clocks::{ClockConfig, CoreVoltage},
     config::Config,
-    gpio::{Input, Pull},
+    gpio::{Input, Level, Output, Pull},
     i2c::{Async, Config as I2cConfig, I2c, InterruptHandler},
     peripherals::I2C0,
 };
@@ -45,7 +45,9 @@ bind_interrupts!(struct Irqs {
 async fn main(spawner: Spawner) {
     #[allow(clippy::unwrap_used)]
     // Reduce the clock speed to conserve power
-    let p = embassy_rp::init(Config::new(ClockConfig::system_freq(18_000_000).unwrap()));
+    let mut config = Config::new(ClockConfig::system_freq(18_000_000).unwrap());
+    config.clocks.core_voltage = CoreVoltage::V0_90;
+    let p = embassy_rp::init(config);
 
     // I2C setup
     let sda = p.PIN_16;
@@ -66,10 +68,6 @@ async fn main(spawner: Spawner) {
     // Initialize VBUS monitoring
     let vbus = Input::new(p.PIN_24, Pull::None);
 
-    // Initialize VSYS voltage monitoring
-    let adc = Adc::new(p.ADC, Irqs, AdcConfig::default());
-    let channel = Channel::new_pin(p.PIN_29, Pull::None);
-
     #[allow(clippy::unwrap_used)]
     spawner
         .spawn(sensor::sensor_task(i2c_device_aht21, i2c_device_ens160, ens160_int))
@@ -83,5 +81,5 @@ async fn main(spawner: Spawner) {
     #[allow(clippy::unwrap_used)]
     spawner.spawn(vbus::vbus_monitor_task(vbus)).unwrap();
     #[allow(clippy::unwrap_used)]
-    spawner.spawn(vsys::vsys_voltage_task(adc, channel)).unwrap();
+    spawner.spawn(vsys::vsys_voltage_task(p.ADC, p.PIN_29)).unwrap();
 }

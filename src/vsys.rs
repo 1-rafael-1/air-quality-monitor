@@ -2,12 +2,20 @@
 
 use defmt::{Format, error, info};
 use embassy_futures::select::{Either, select};
-use embassy_rp::adc::{Adc, Async, Channel, Error};
+use embassy_rp::{
+    Peri,
+    adc::{Adc, Async, Channel, Config, Error},
+    gpio::Pull,
+    peripherals::{ADC, PIN_29},
+};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Timer, with_timeout};
 use moving_median::MovingMedian;
 
-use crate::event::{Event, send_event};
+use crate::{
+    Irqs,
+    event::{Event, send_event},
+};
 
 /// Signal for triggering state updates
 pub static VSYS: Signal<CriticalSectionRawMutex, VsysCommand> = Signal::new();
@@ -36,11 +44,12 @@ pub enum VsysCommand {
 }
 
 #[embassy_executor::task]
-pub async fn vsys_voltage_task(mut adc: Adc<'static, Async>, mut channel: Channel<'static>) {
+pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<'static, PIN_29>) {
     let mut voltage_median = MovingMedian::<f32, MEDIAN_WINDOW_SIZE>::new();
     info!("VSYS voltage task initialized successfully");
 
     loop {
+        // Wait for command or periodic measurement trigger
         let meas_target_cnt = match select(wait_for_vsys_command(), Timer::after(INTERVAL)).await {
             Either::First(command) => {
                 info!("VSYS command received: {}", command);
@@ -52,20 +61,31 @@ pub async fn vsys_voltage_task(mut adc: Adc<'static, Async>, mut channel: Channe
             }
         };
 
-        let mut meas_is_cnt: usize = 0;
-        while meas_is_cnt < meas_target_cnt {
-            match read_voltage(&mut adc, &mut channel).await {
-                Ok(value) => {
-                    info!("VSYS voltage measurement: {}V", value);
-                    voltage_median.add_value(value);
-                    meas_is_cnt += 1;
+        let adc_peri = p_adc.reborrow();
+        let pin_peri = p_pin29.reborrow();
+
+        '_adc: {
+            // Initialize ADC and channel for this measurement session
+            let mut adc = Adc::new(adc_peri, Irqs, Config::default());
+            let mut channel = Channel::new_pin(pin_peri, Pull::None);
+            Timer::after_millis(100).await; // small delay to ensure ADC is ready
+
+            let mut meas_is_cnt: usize = 0;
+            while meas_is_cnt < meas_target_cnt {
+                match read_voltage(&mut adc, &mut channel).await {
+                    Ok(value) => {
+                        info!("VSYS voltage measurement: {}V", value);
+                        voltage_median.add_value(value);
+                        meas_is_cnt += 1;
+                    }
+                    Err(e) => {
+                        error!("Could not read voltage: {}", e);
+                    }
                 }
-                Err(e) => {
-                    error!("Could not read voltage: {}", e);
-                }
+                Timer::after(Duration::from_millis(20)).await; // small delay between measurements
             }
-            Timer::after(Duration::from_millis(20)).await; // small delay between measurements
         }
+
         let battery_percentage = voltage_to_percentage(voltage_median.median());
         send_event(Event::BatteryLevel(battery_percentage)).await;
     }
@@ -97,15 +117,15 @@ async fn read_voltage(adc: &mut Adc<'_, Async>, channel: &mut Channel<'_>) -> Re
 fn adc_value_to_voltage(adc_value: u16) -> f32 {
     // Convert ADC value to voltage (assuming 3.3V reference and 12-bit resolution)
     const ADC_REF_VOLTAGE: f32 = 3.3;
-    const VOLTAGED_DIVIDER: f32 = 3.0;
+    const VOLTAGE_DIVIDER: f32 = 3.0;
     const ADC_MAX_VALUE: f32 = 4096.0; // 12-bit ADC
-    f32::from(adc_value) * VOLTAGED_DIVIDER * (ADC_REF_VOLTAGE / ADC_MAX_VALUE)
+    f32::from(adc_value) * VOLTAGE_DIVIDER * (ADC_REF_VOLTAGE / ADC_MAX_VALUE)
 }
 
 /// Converts voltage to battery percentage
 fn voltage_to_percentage(voltage: f32) -> u8 {
     const MIN_VOLTAGE: f32 = 2.8; // 0% battery
-    const MAX_VOLTAGE: f32 = 4.2; // 100% battery
+    const MAX_VOLTAGE: f32 = 4.1; // 100% battery
 
     let percentage = if voltage >= MAX_VOLTAGE {
         100.0

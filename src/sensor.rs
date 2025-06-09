@@ -1,7 +1,6 @@
 //! Sensor task for reading data from AHT21 and ENS160 sensors.
 use aht20_async::Aht20;
 use defmt::{Debug2Format, info};
-use defmt_rtt as _;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_rp::{
     gpio::Input,
@@ -49,8 +48,8 @@ async fn initialize_ens160(
         trigger_watchdog_reset();
         return None;
     }
-
     info!("ENS160 initialized successfully");
+
     Some(ens160)
 }
 
@@ -96,15 +95,6 @@ async fn read_sensor_data(
     let (temp, rh) = (temp.celsius(), hum.rh());
 
     let status = ens160.get_status().await.map_err(|_| "Failed to get ENS160 status")?;
-
-    match status.validity_flag() {
-        ValidityFlag::InitialStartupPhase => {
-            info!("ENS160 still in InitialStartupPhase - sensor warming up");
-        }
-        other => {
-            info!("ENS160 validity flag: {}", Debug2Format(&other));
-        }
-    }
     info!("ENS160 status: {}", Debug2Format(&status));
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -147,11 +137,24 @@ async fn read_sensor_data(
 async fn ens160_sleep(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
 ) -> Result<(), &'static str> {
+    info!("Putting ENS160 sensor to sleep");
+    // first check the status, if ens160 is in Initial Startup Phase, we must not put it to sleep
+    let status = ens160
+        .get_status()
+        .await
+        .map_err(|_| "Failed to get ENS160 status before sleep")?;
+
+    if matches!(status.validity_flag(), ValidityFlag::InitialStartupPhase) {
+        info!("ENS160 is still in Initial Startup Phase - cannot put to sleep");
+        return Ok(());
+    }
+
     ens160
         .set_operation_mode(OperationMode::Sleep)
         .await
         .map_err(|_| "Failed to set ENS160 to Idle mode")?;
     info!("ENS160 set to Idle mode");
+
     Ok(())
 }
 
@@ -160,66 +163,26 @@ async fn ens160_wake(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
     int: &mut Input<'static>,
 ) -> Result<(), &'static str> {
-    // Set ENS160 back to Standard mode
-    ens160
-        .clear_command()
-        .await
-        .map_err(|_| "Failed to clear ENS160 command")?;
-
+    info!("Waking up ENS160 sensor");
     ens160
         .set_operation_mode(OperationMode::Standard)
         .await
         .map_err(|_| "Failed to set ENS160 to Standard mode")?;
-    info!("ENS160 set to Standard mode");
 
-    loop {
-        // first wait for the interrupt to be triggered, indicating the sensor has data ready, so that we can read current status
-        int.wait_for_low().await;
-        info!("ENS160 interrupt triggered - sensor data ready");
+    // first wait for the interrupt to be triggered, indicating the sensor has data ready, so that we can read current status
+    int.wait_for_low().await;
 
-        // Read the status
-        let status = ens160
-            .get_status()
-            .await
-            .map_err(|_| "Failed to get ENS160 status after setting to Standard mode")?;
-        info!("ENS160 status: {}", Debug2Format(&status));
+    // Read the status
+    let status = ens160
+        .get_status()
+        .await
+        .map_err(|_| "Failed to get ENS160 status after setting to Standard mode")?;
+    info!("ENS160 status: {}", Debug2Format(&status));
 
-        // Check if the sensor is warmed up, break the loop if it is
-        if is_sensor_warmed_up(status.validity_flag()).await {
-            break;
-        }
-
-        // If the sensor is still warming up, we need to clear the registers and wait
-        ens160
-            .clear_command()
-            .await
-            .map_err(|_| "Failed to clear ENS160 command")?;
-        info!("ENS160 still in WarmupPhase");
-
-        Timer::after_secs(1).await;
-    }
+    // warmup time is 3 minutes as per datasheet
+    Timer::after_secs(180).await;
 
     Ok(())
-}
-
-/// Check if the ENS160 sensor is warmed up based on its validity flag
-async fn is_sensor_warmed_up(validity_flag: ValidityFlag) -> bool {
-    // If the sensor is in InitialStartupPhase, we tolerate somewhat imprecise readings
-    // In that case we wait 3min for the sensor to warm up
-    if matches!(validity_flag, ValidityFlag::InitialStartupPhase) {
-        info!("ENS160 still in InitialStartupPhase - wait 3 minutes for sensor to warm up");
-        Timer::after_secs(180).await;
-        return true;
-    }
-
-    // If the sensor is not in WarmupPhase here, we can proceed
-    if matches!(validity_flag, ValidityFlag::WarmupPhase) {
-        info!("ENS160 still in WarmupPhase - waiting for sensor to warm up");
-        false
-    } else {
-        info!("ENS160 is warmed up and ready to use");
-        true
-    }
 }
 
 /// Sensor task for reading data from AHT21 and ENS160 sensors.
@@ -251,7 +214,9 @@ pub async fn sensor_task(
         )
         .await
     {
-        Ok(_) => info!("ENS160 interrupt pin configured successfully"),
+        Ok(_) => {
+            info!("ENS160 interrupt pin configured successfully")
+        }
         Err(e) => {
             info!(
                 "Failed to configure ENS160 interrupt pin: {} - triggering system reset",
