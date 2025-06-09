@@ -168,17 +168,23 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
             DisplayCommand::BatteryCharging(is_charging) => {
                 state.is_charging = is_charging;
 
-                // Redraw sensor data if we have it
+                // Always redraw sensor data if we have it
                 if let Some(ref sensor_data) = state.last_sensor_data {
                     settings.draw_sensor_data(&mut display.color_converted(), sensor_data);
+                } else {
+                    // If no sensor data yet, show a simple status message
+                    settings.draw_initialization_message(&mut display.color_converted());
                 }
             }
             DisplayCommand::UpdateBatteryPercentage(bat_percent) => {
                 state.battery_percent = bat_percent;
 
-                // Redraw sensor data if we have it
+                // Always redraw sensor data if we have it
                 if let Some(ref sensor_data) = state.last_sensor_data {
                     settings.draw_sensor_data(&mut display.color_converted(), sensor_data);
+                } else {
+                    // If no sensor data yet, show a simple status message
+                    settings.draw_initialization_message(&mut display.color_converted());
                 }
             }
         }
@@ -226,6 +232,10 @@ struct Settings<'a> {
     humidity_position: Point,
     /// Style of the humidity text
     humidity_text_style: MonoTextStyle<'a, BinaryColor>,
+    /// Position of the sensor initialization message
+    sensor_init_position: Point,
+    /// Style of the sensor initialization message
+    sensor_init_text_style: MonoTextStyle<'a, BinaryColor>,
 }
 
 impl Settings<'_> {
@@ -272,6 +282,11 @@ impl Settings<'_> {
                 .font(&FONT_6X13)
                 .text_color(BinaryColor::On)
                 .build(),
+            sensor_init_position: Point::new(0, 30),
+            sensor_init_text_style: MonoTextStyleBuilder::new()
+                .font(&FONT_6X13)
+                .text_color(BinaryColor::On)
+                .build(),
         })
     }
 
@@ -286,6 +301,21 @@ impl Settings<'_> {
             BatteryLevel::Bat080 => &self.bat[4],
             BatteryLevel::Bat100 => &self.bat[5],
         }
+    }
+
+    /// Draws an initialization message when no sensor data is available
+    fn draw_initialization_message<D>(&self, display: &mut D)
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        Text::with_baseline(
+            "Initializing sensors",
+            self.sensor_init_position,
+            self.sensor_init_text_style,
+            Baseline::Top,
+        )
+        .draw(display)
+        .unwrap_or_default();
     }
 
     /// Draws sensor data to the display

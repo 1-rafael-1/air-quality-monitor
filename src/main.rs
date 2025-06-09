@@ -44,8 +44,8 @@ bind_interrupts!(struct Irqs {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     #[allow(clippy::unwrap_used)]
-    // Using the system clock at 12 MHz to conserve power
-    let p = embassy_rp::init(Config::new(ClockConfig::system_freq(12_000_000).unwrap()));
+    // Reduce the clock speed to conserve power
+    let p = embassy_rp::init(Config::new(ClockConfig::system_freq(18_000_000).unwrap()));
 
     // I2C setup
     let sda = p.PIN_16;
