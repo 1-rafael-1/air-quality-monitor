@@ -22,30 +22,13 @@ use embedded_graphics::{
     prelude::*,
     text::{Baseline, Text},
 };
-use ens160_aq::data::{AirQualityIndex, ValidityFlag};
+use ens160_aq::data::AirQualityIndex;
 use heapless::String;
 use panic_probe as _;
 use ssd1306_async::{I2CDisplayInterface, Ssd1306, prelude::*};
 use tinybmp::Bmp;
 
 use crate::watchdog::trigger_watchdog_reset;
-
-/// Wrapper for `ValidityFlag` to add `PartialEq`
-#[derive(Debug, Copy, Clone)]
-pub struct ValidityFlagWrapper(pub ValidityFlag);
-
-impl PartialEq for ValidityFlagWrapper {
-    fn eq(&self, other: &Self) -> bool {
-        // Compare based on the discriminants since ValidityFlag doesn't implement PartialEq
-        core::mem::discriminant(&self.0) == core::mem::discriminant(&other.0)
-    }
-}
-
-impl From<ValidityFlag> for ValidityFlagWrapper {
-    fn from(flag: ValidityFlag) -> Self {
-        Self(flag)
-    }
-}
 
 /// Commands for controlling the display
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -62,8 +45,6 @@ pub enum DisplayCommand {
         etoh: u16,
         /// Air quality index
         air_quality: AirQualityIndex,
-        /// ENS160 validity flag
-        ens160_validity: ValidityFlagWrapper,
     },
     /// Update the battery charging state
     BatteryCharging(bool),
@@ -147,7 +128,6 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                 co2,
                 etoh,
                 air_quality,
-                ens160_validity,
             } => {
                 // Store the new sensor data
                 let sensor_data = SensorData {
@@ -156,7 +136,6 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                     co2,
                     etoh,
                     air_quality,
-                    ens160_validity,
                 };
 
                 // Draw the sensor data
@@ -308,6 +287,10 @@ impl Settings<'_> {
     where
         D: DrawTarget<Color = BinaryColor>,
     {
+        // Draw the settings icon
+        let settings_image = Image::new(&self.init_icon, self.air_quality_position);
+        settings_image.draw(&mut display.color_converted()).unwrap_or_default();
+
         Text::with_baseline(
             "Initializing sensors",
             self.sensor_init_position,
@@ -323,26 +306,17 @@ impl Settings<'_> {
     where
         D: DrawTarget<Color = BinaryColor>,
     {
-        // Check if ENS160 is in InitialStartupPhase
-        let is_initial_startup = matches!(sensor_data.ens160_validity.0, ValidityFlag::InitialStartupPhase);
-
-        if is_initial_startup {
-            // Draw the settings icon instead of air quality
-            let settings_image = Image::new(&self.init_icon, self.air_quality_position);
-            settings_image.draw(&mut display.color_converted()).unwrap_or_default();
-        } else {
-            // Draw the air quality text
-            let mut aq_text: String<12> = String::new();
-            let _ = write!(aq_text, "{:?}", sensor_data.air_quality);
-            Text::with_baseline(
-                &aq_text,
-                self.air_quality_position,
-                self.air_quality_text_style,
-                Baseline::Top,
-            )
-            .draw(display)
-            .unwrap_or_default();
-        }
+        // Draw the air quality text
+        let mut aq_text: String<12> = String::new();
+        let _ = write!(aq_text, "{:?}", sensor_data.air_quality);
+        Text::with_baseline(
+            &aq_text,
+            self.air_quality_position,
+            self.air_quality_text_style,
+            Baseline::Top,
+        )
+        .draw(display)
+        .unwrap_or_default();
 
         // Draw the CO2 text
         let mut co2_text: String<16> = String::new();
@@ -407,8 +381,6 @@ struct SensorData {
     etoh: u16,
     /// Air quality index
     air_quality: AirQualityIndex,
-    /// ENS160 validity flag
-    ens160_validity: ValidityFlagWrapper,
 }
 
 impl DisplayState {

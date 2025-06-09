@@ -1,7 +1,7 @@
 //! Events and system channel for sending and receiving events
 
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
-use ens160_aq::data::{AirQualityIndex, ValidityFlag};
+use ens160_aq::data::AirQualityIndex;
 
 /// System event channel for sending and receiving events
 pub static EVENT_CHANNEL: Channel<CriticalSectionRawMutex, Event, EVENT_CHANNEL_CAPACITY> = Channel::new();
@@ -33,8 +33,6 @@ pub enum Event {
         etoh: u16,
         /// Air quality index data
         air_quality: AirQualityIndex,
-        /// ENS160 validity flag for CO2 and TVOC
-        ens160_validity: ValidityFlag,
     },
     /// Battery charging state event (true = charging, false = not charging)
     BatteryCharging(bool),

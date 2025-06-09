@@ -24,7 +24,6 @@ fn process_event(event: Event) {
             co2,
             etoh,
             air_quality,
-            ens160_validity,
         } => {
             send_display_command(DisplayCommand::SensorData {
                 temperature,
@@ -32,7 +31,6 @@ fn process_event(event: Event) {
                 co2,
                 etoh,
                 air_quality,
-                ens160_validity: ens160_validity.into(),
             });
         }
         Event::BatteryCharging(is_charging) => {
