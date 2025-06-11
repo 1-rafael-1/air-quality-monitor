@@ -1,8 +1,8 @@
 [package]
-readme = "An air quality monitor using the ENS160 AQ sensor and AHT20 temperature/humidity sensor, with a display."
+readme = "An air quality monitor using the ENS160 AQ sensor and AHT21 temperature/humidity sensor, with a display."
 name = "air-quality-monitor"
 authors = ["rafael <rafael.koch@gmx.net>"]
-description = "An air quality monitor using the ENS160 AQ sensor and AHT20 temperature/humidity sensor, with a display."
+description = "An air quality monitor using the ENS160 AQ sensor and AHT21 temperature/humidity sensor, with a display."
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
