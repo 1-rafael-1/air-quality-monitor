@@ -23,6 +23,12 @@ use crate::{
 /// Temperature offset for AHT21 sensor in degrees Celsius
 static AHT21_TEMPERATURE_OFFSET: f32 = -3.5;
 
+/// Warmup time for ENS160 sensor in seconds
+const WARMUP_TIME: u64 = 180;
+
+/// Idle time for ENS160 sensor in seconds to conserve power
+const IDLE_TIME: u64 = 120;
+
 /// Initialize the AHT21 sensor
 async fn initialize_aht21(
     aht21_device: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>,
@@ -150,24 +156,24 @@ async fn read_ens160_data(
     Ok(readings)
 }
 
-/// Put ENS160 to sleep for power conservation
-async fn ens160_sleep(
+/// Put ENS160 to idle for power conservation
+async fn ens160_idle(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
 ) -> Result<(), &'static str> {
-    info!("Putting ENS160 sensor to sleep");
+    info!("Putting ENS160 sensor to idle mode");
     // first check the status, if ens160 is in Initial Startup Phase, we must not put it to sleep
     let status = ens160
         .get_status()
         .await
-        .map_err(|_| "Failed to get ENS160 status before sleep")?;
+        .map_err(|_| "Failed to get ENS160 status before idle mode")?;
 
     if matches!(status.validity_flag(), ValidityFlag::InitialStartupPhase) {
-        info!("ENS160 is still in Initial Startup Phase - cannot put to sleep");
+        info!("ENS160 is still in Initial Startup Phase - cannot put to idle mode");
         return Ok(());
     }
 
     ens160
-        .set_operation_mode(OperationMode::Sleep)
+        .set_operation_mode(OperationMode::Idle)
         .await
         .map_err(|_| "Failed to set ENS160 to Idle mode")?;
     info!("ENS160 set to Idle mode");
@@ -186,8 +192,7 @@ async fn ens160_wake(
         .await
         .map_err(|_| "Failed to set ENS160 to Standard mode")?;
 
-    // first wait for the interrupt to be triggered, indicating the sensor has data ready, so that we can read current status
-    int.wait_for_low().await;
+    Timer::after_secs(WARMUP_TIME).await;
 
     // Read the status
     let status = ens160
@@ -196,8 +201,16 @@ async fn ens160_wake(
         .map_err(|_| "Failed to get ENS160 status after setting to Standard mode")?;
     info!("ENS160 status: {}", Debug2Format(&status));
 
-    // warmup time is 3 minutes as per datasheet
-    Timer::after_secs(180).await;
+    // get measurements to ensure sensor is ready, flushing bad first readings
+    let _ = ens160
+        .get_measurements()
+        .await
+        .map_err(|_| "Failed to get ENS160 measurements after waking up")?;
+
+    // first wait for the interrupt to be triggered, indicating the sensor has data ready, so that we can read current status
+    info!("currently is interrupt active:{}", int.is_low());
+    int.wait_for_low().await;
+    info!("ENS160 sensor is awake and ready for measurements");
 
     Ok(())
 }
@@ -224,15 +237,15 @@ pub async fn sensor_task(
     match ens160
         .config_interrupt_pin(
             InterruptPinConfig::builder()
-                .active_low()
-                .enable_interrupt()
+                .push_pull()
                 .on_new_data()
+                .enable_interrupt()
                 .build(),
         )
         .await
     {
-        Ok(_) => {
-            info!("ENS160 interrupt pin configured successfully");
+        Ok(val) => {
+            info!("ENS160 interrupt pin configured successfully to {}", val);
         }
         Err(e) => {
             info!(
@@ -270,7 +283,7 @@ pub async fn sensor_task(
         let ens160_result = read_ens160_data(&mut ens160, prev_temp, prev_humidity).await;
 
         // Put ENS160 to sleep for power conservation immediately after reading
-        if let Err(e) = ens160_sleep(&mut ens160).await {
+        if let Err(e) = ens160_idle(&mut ens160).await {
             info!("ENS160 sleep failed (continuing): {}", e);
         }
 
@@ -299,7 +312,6 @@ pub async fn sensor_task(
             }
         }
 
-        // Wait 2 minutes for cooling period
-        Timer::after_secs(120).await;
+        Timer::after_secs(IDLE_TIME).await;
     }
 }
