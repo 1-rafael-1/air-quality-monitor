@@ -70,12 +70,16 @@ impl From<ValidityFlag> for ValidityFlagWrapper {
     }
 }
 
-/// Struct to hold sensor readings
-struct SensorReadings {
+/// Struct to hold AHT21 sensor readings
+struct Aht21Readings {
     /// Temperature in degrees Celsius
     temperature: f32,
     /// Humidity in percentage
     humidity: f32,
+}
+
+/// Struct to hold ENS160 sensor readings
+struct Ens160Readings {
     /// eCO2 level in ppm
     co2: f32,
     /// Ethanol (TVOC) level in ppb
@@ -84,16 +88,34 @@ struct SensorReadings {
     air_quality: AirQualityIndex,
 }
 
-/// Read data from AHT21 and ENS160 sensors
-async fn read_sensor_data(
+/// Read data from AHT21 sensor
+async fn read_aht21_data(
     aht21: &mut Aht20<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
-    ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
-    eco2_median: &mut MovingMedian<f32, 3>,
-    etoh_median: &mut MovingMedian<f32, 3>,
-) -> Result<SensorReadings, &'static str> {
+) -> Result<Aht21Readings, &'static str> {
     let (hum, temp) = aht21.read().await.map_err(|_| "Failed to read AHT21 sensor")?;
     let (temp, rh) = (temp.celsius(), hum.rh());
 
+    let readings = Aht21Readings {
+        temperature: temp,
+        humidity: rh,
+    };
+
+    info!(
+        "Temperature: {}°C, Humidity: {}%",
+        readings.temperature, readings.humidity
+    );
+
+    Ok(readings)
+}
+
+/// Read data from ENS160 sensor with temperature and humidity compensation
+async fn read_ens160_data(
+    ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
+    eco2_median: &mut MovingMedian<f32, 3>,
+    etoh_median: &mut MovingMedian<f32, 3>,
+    temp: f32,
+    rh: f32,
+) -> Result<Ens160Readings, &'static str> {
     let status = ens160.get_status().await.map_err(|_| "Failed to get ENS160 status")?;
     info!("ENS160 status: {}", Debug2Format(&status));
 
@@ -115,9 +137,7 @@ async fn read_sensor_data(
         .await
         .map_err(|_| "Failed to get Air Quality Index")?;
 
-    let readings = SensorReadings {
-        temperature: temp,
-        humidity: rh,
+    let readings = Ens160Readings {
         co2: eco2_median.median(),
         etoh: etoh_median.median(),
         air_quality: aq,
@@ -215,7 +235,7 @@ pub async fn sensor_task(
         .await
     {
         Ok(_) => {
-            info!("ENS160 interrupt pin configured successfully")
+            info!("ENS160 interrupt pin configured successfully");
         }
         Err(e) => {
             info!(
@@ -230,39 +250,69 @@ pub async fn sensor_task(
     let mut eco2_median = MovingMedian::<f32, 3>::new();
     let mut etoh_median = MovingMedian::<f32, 3>::new();
 
+    // Store previous AHT21 readings for ENS160 compensation
+    let mut prev_temp = 25.0; // Default temperature
+    let mut prev_humidity = 50.0; // Default humidity
+
     info!("Sensor task initialized successfully");
 
     loop {
-        // Wake up sensor and wait for warmup
+        // Read AHT21 data after cooling period to get accurate readings
+        let aht21_result = read_aht21_data(&mut aht21).await;
+
+        // Update stored values for ENS160 compensation if AHT21 reading was successful
+        if let Ok(ref aht21_readings) = aht21_result {
+            prev_temp = aht21_readings.temperature;
+            prev_humidity = aht21_readings.humidity;
+        }
+
+        // Wake up ENS160 sensor and wait for warmup
         if let Err(e) = ens160_wake(&mut ens160, &mut ens160_int).await {
             info!("ENS160 wake failed (continuing): {}", e);
             // Continue in the loop - all errors in the loop are considered transient
         }
 
-        match read_sensor_data(&mut aht21, &mut ens160, &mut eco2_median, &mut etoh_median).await {
-            Ok(readings) => {
-                send_event(Event::SensorData {
-                    temperature: readings.temperature,
-                    humidity: readings.humidity,
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    co2: readings.co2 as u16,
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    etoh: readings.etoh as u16,
-                    air_quality: readings.air_quality,
-                })
-                .await;
-            }
-            Err(e) => {
-                info!("Sensor reading failed (continuing): {}", e);
-                // Continue in the loop - all errors in the loop are considered transient
-            }
-        }
+        // Read ENS160 data using current AHT21 readings for compensation
+        let ens160_result = read_ens160_data(
+            &mut ens160,
+            &mut eco2_median,
+            &mut etoh_median,
+            prev_temp,
+            prev_humidity,
+        )
+        .await;
 
-        // Put sensor to sleep for power conservation
+        // Put ENS160 to sleep for power conservation immediately after reading
         if let Err(e) = ens160_sleep(&mut ens160).await {
             info!("ENS160 sleep failed (continuing): {}", e);
         }
 
+        // Combine readings and send event if both sensors read successfully
+        match (ens160_result, aht21_result) {
+            (Ok(ens160_readings), Ok(aht21_readings)) => {
+                send_event(Event::SensorData {
+                    temperature: aht21_readings.temperature,
+                    humidity: aht21_readings.humidity,
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    co2: ens160_readings.co2 as u16,
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    etoh: ens160_readings.etoh as u16,
+                    air_quality: ens160_readings.air_quality,
+                })
+                .await;
+            }
+            (Err(ens160_err), Err(aht21_err)) => {
+                info!("Both sensors failed - ENS160: {}, AHT21: {}", ens160_err, aht21_err);
+            }
+            (Err(ens160_err), Ok(_)) => {
+                info!("ENS160 reading failed (continuing): {}", ens160_err);
+            }
+            (Ok(_), Err(aht21_err)) => {
+                info!("AHT21 reading failed (continuing): {}", aht21_err);
+            }
+        }
+
+        // Wait 2 minutes for cooling period
         Timer::after_secs(120).await;
     }
 }

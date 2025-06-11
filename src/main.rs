@@ -14,7 +14,7 @@ use embassy_rp::{
     block::ImageDef,
     clocks::{ClockConfig, CoreVoltage},
     config::Config,
-    gpio::{Input, Level, Output, Pull},
+    gpio::{Input, Pull},
     i2c::{Async, Config as I2cConfig, I2c, InterruptHandler},
     peripherals::I2C0,
 };
