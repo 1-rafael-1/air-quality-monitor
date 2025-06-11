@@ -13,13 +13,15 @@ use ens160_aq::{
     Ens160,
     data::{AirQualityIndex, InterruptPinConfig, OperationMode, ValidityFlag},
 };
-use moving_median::MovingMedian;
 use panic_probe as _;
 
 use crate::{
     event::{Event, send_event},
     watchdog::trigger_watchdog_reset,
 };
+
+/// Temperature offset for AHT21 sensor in degrees Celsius
+static AHT21_TEMPERATURE_OFFSET: f32 = -3.5;
 
 /// Initialize the AHT21 sensor
 async fn initialize_aht21(
@@ -93,7 +95,7 @@ async fn read_aht21_data(
     aht21: &mut Aht20<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
 ) -> Result<Aht21Readings, &'static str> {
     let (hum, temp) = aht21.read().await.map_err(|_| "Failed to read AHT21 sensor")?;
-    let (temp, rh) = (temp.celsius(), hum.rh());
+    let (temp, rh) = (temp.celsius() + AHT21_TEMPERATURE_OFFSET, hum.rh());
 
     let readings = Aht21Readings {
         temperature: temp,
@@ -111,8 +113,6 @@ async fn read_aht21_data(
 /// Read data from ENS160 sensor with temperature and humidity compensation
 async fn read_ens160_data(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
-    eco2_median: &mut MovingMedian<f32, 3>,
-    etoh_median: &mut MovingMedian<f32, 3>,
     temp: f32,
     rh: f32,
 ) -> Result<Ens160Readings, &'static str> {
@@ -127,10 +127,7 @@ async fn read_ens160_data(
     Timer::after_millis(100).await;
 
     let eco2 = ens160.get_eco2().await.map_err(|_| "Failed to get eCO2")?;
-    eco2_median.add_value(f32::from(eco2.get_value()));
-
     let etoh = ens160.get_etoh().await.map_err(|_| "Failed to get ethanol")?;
-    etoh_median.add_value(f32::from(etoh));
 
     let aq = ens160
         .get_airquality_index()
@@ -138,8 +135,8 @@ async fn read_ens160_data(
         .map_err(|_| "Failed to get Air Quality Index")?;
 
     let readings = Ens160Readings {
-        co2: eco2_median.median(),
-        etoh: etoh_median.median(),
+        co2: f32::from(eco2.get_value()),
+        etoh: f32::from(etoh),
         air_quality: aq,
     };
 
@@ -247,9 +244,6 @@ pub async fn sensor_task(
         }
     }
 
-    let mut eco2_median = MovingMedian::<f32, 3>::new();
-    let mut etoh_median = MovingMedian::<f32, 3>::new();
-
     // Store previous AHT21 readings for ENS160 compensation
     let mut prev_temp = 25.0; // Default temperature
     let mut prev_humidity = 50.0; // Default humidity
@@ -273,14 +267,7 @@ pub async fn sensor_task(
         }
 
         // Read ENS160 data using current AHT21 readings for compensation
-        let ens160_result = read_ens160_data(
-            &mut ens160,
-            &mut eco2_median,
-            &mut etoh_median,
-            prev_temp,
-            prev_humidity,
-        )
-        .await;
+        let ens160_result = read_ens160_data(&mut ens160, prev_temp, prev_humidity).await;
 
         // Put ENS160 to sleep for power conservation immediately after reading
         if let Err(e) = ens160_sleep(&mut ens160).await {
