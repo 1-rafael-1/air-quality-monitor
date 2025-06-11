@@ -12,23 +12,31 @@ use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     signal::Signal,
 };
+use embassy_time::{Duration, Timer};
 use embedded_graphics::{
     image::Image,
     mono_font::{
         MonoTextStyle, MonoTextStyleBuilder,
-        ascii::{FONT_6X13, FONT_8X13_BOLD},
+        ascii::{FONT_5X8, FONT_6X13, FONT_8X13_BOLD},
     },
     pixelcolor::{BinaryColor, Gray8},
     prelude::*,
+    primitives::{PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
 use ens160_aq::data::AirQualityIndex;
-use heapless::String;
+use heapless::{String, Vec};
 use panic_probe as _;
 use ssd1306_async::{I2CDisplayInterface, Ssd1306, prelude::*};
 use tinybmp::Bmp;
 
 use crate::watchdog::trigger_watchdog_reset;
+
+/// Signal for triggering state updates
+pub static DISPLAY: Signal<CriticalSectionRawMutex, DisplayCommand> = Signal::new();
+
+/// Duration for toggling display modes
+static TOGGLE_MODE: Duration = Duration::from_secs(10);
 
 /// Commands for controlling the display
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -50,10 +58,20 @@ pub enum DisplayCommand {
     BatteryCharging(bool),
     /// Update the battery level
     UpdateBatteryPercentage(u8),
+    /// Toggle display mode (triggered by mode switching task)
+    ToggleMode,
 }
 
-/// Signal for triggering state updates
-pub static DISPLAY: Signal<CriticalSectionRawMutex, DisplayCommand> = Signal::new();
+/// Display modes for alternating between raw data and history graphs
+#[derive(Debug, PartialEq, Copy, Clone)]
+enum DisplayMode {
+    /// Show raw sensor data
+    RawData,
+    /// Show CO2 history bar chart
+    Co2History,
+    /// Show `EtOH` history bar chart
+    EtohHistory,
+}
 
 /// Triggers a display update with the provided command
 pub fn send_display_command(command: DisplayCommand) {
@@ -66,6 +84,7 @@ async fn wait_for_display_command() -> DisplayCommand {
 }
 
 #[embassy_executor::task]
+#[allow(clippy::too_many_lines)]
 pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>) {
     // Initialize the display
     let interface = I2CDisplayInterface::new(i2c_device);
@@ -115,11 +134,16 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
 
     info!("Display task initialized successfully");
 
+    // Show initial startup screen
+    settings.draw_initialization_message(&mut display.color_converted());
+    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+    if let Err(e) = display.flush().await {
+        error!("Failed to flush initial screen (continuing): {}", Debug2Format(&e));
+    }
+
     // Main display loop - all errors here are considered transient
     loop {
         let command = wait_for_display_command().await;
-
-        display.clear();
 
         match command {
             DisplayCommand::SensorData {
@@ -138,8 +162,30 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                     air_quality,
                 };
 
-                // Draw the sensor data
-                settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
+                // Add CO2 measurement to history
+                state.add_co2_measurement(co2);
+
+                // Add EtOH measurement to history
+                state.add_etoh_measurement(etoh);
+
+                // Clear main content area (preserves battery icon)
+                settings.clear_main_area(&mut display.color_converted());
+
+                // Draw based on current display mode
+                match state.get_display_mode() {
+                    DisplayMode::RawData => {
+                        settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
+                    }
+                    DisplayMode::Co2History => {
+                        settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
+                    }
+                    DisplayMode::EtohHistory => {
+                        settings.draw_etoh_history(&mut display.color_converted(), state.get_etoh_history());
+                    }
+                }
+
+                // Draw battery icon
+                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
 
                 // Cache the sensor data for future battery-only updates
                 state.last_sensor_data = Some(sensor_data);
@@ -147,31 +193,63 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
             DisplayCommand::BatteryCharging(is_charging) => {
                 state.is_charging = is_charging;
 
-                // Always redraw sensor data if we have it
-                if let Some(ref sensor_data) = state.last_sensor_data {
-                    settings.draw_sensor_data(&mut display.color_converted(), sensor_data);
-                } else {
-                    // If no sensor data yet, show a simple status message
-                    settings.draw_initialization_message(&mut display.color_converted());
-                }
+                // Only clear and redraw battery icon area
+                settings.clear_battery_area(&mut display.color_converted());
+                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
             }
             DisplayCommand::UpdateBatteryPercentage(bat_percent) => {
                 state.battery_percent = bat_percent;
 
-                // Always redraw sensor data if we have it
-                if let Some(ref sensor_data) = state.last_sensor_data {
-                    settings.draw_sensor_data(&mut display.color_converted(), sensor_data);
+                // Only clear and redraw battery icon area
+                settings.clear_battery_area(&mut display.color_converted());
+                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+            }
+            DisplayCommand::ToggleMode => {
+                // Only toggle if we have sensor data
+                if let Some(sensor_data) = state.last_sensor_data.clone() {
+                    state.toggle_display_mode();
+
+                    // If switching to a history mode but no data available, continue toggling until we find a mode with data or get back to RawData
+                    let mut attempts = 0;
+                    while attempts < 3 {
+                        match state.get_display_mode() {
+                            DisplayMode::Co2History if state.get_co2_history().is_empty() => {
+                                state.toggle_display_mode();
+                                attempts += 1;
+                            }
+                            DisplayMode::EtohHistory if state.get_etoh_history().is_empty() => {
+                                state.toggle_display_mode();
+                                attempts += 1;
+                            }
+                            _ => break, // Found a valid mode or back to RawData
+                        }
+                    }
+
+                    // Clear main content area (preserves battery icon)
+                    settings.clear_main_area(&mut display.color_converted());
+
+                    // Redraw with the (potentially adjusted) mode
+                    match state.get_display_mode() {
+                        DisplayMode::RawData => {
+                            settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
+                        }
+                        DisplayMode::Co2History => {
+                            settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
+                        }
+                        DisplayMode::EtohHistory => {
+                            settings.draw_etoh_history(&mut display.color_converted(), state.get_etoh_history());
+                        }
+                    }
                 } else {
-                    // If no sensor data yet, show a simple status message
+                    // No sensor data yet, clear main area and show initialization message
+                    settings.clear_main_area(&mut display.color_converted());
                     settings.draw_initialization_message(&mut display.color_converted());
                 }
+
+                // Draw battery icon (common to both branches)
+                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
             }
         }
-
-        // Draw battery icon
-        let battery_icon = settings.get_battery_icon(&state.get_battery_level());
-        let bat_image = Image::new(battery_icon, settings.bat_position);
-        bat_image.draw(&mut display.color_converted()).unwrap_or_default();
 
         // Flush display - if this fails, it's transient, so we continue
         if let Err(e) = display.flush().await {
@@ -215,6 +293,18 @@ struct Settings<'a> {
     sensor_init_position: Point,
     /// Style of the sensor initialization message
     sensor_init_text_style: MonoTextStyle<'a, BinaryColor>,
+    /// Position for min text in CO2 history
+    minmax_min_position: Point,
+    /// Position for max text in CO2 history
+    minmax_max_position: Point,
+    /// Style for min/max labels in CO2 history chart
+    minmax_text_style: MonoTextStyle<'a, BinaryColor>,
+    /// Bar chart starting Y position
+    chart_start_y: i32,
+    /// Bar chart height
+    chart_height: i32,
+    /// Bar chart width
+    chart_width: i32,
 }
 
 impl Settings<'_> {
@@ -266,6 +356,15 @@ impl Settings<'_> {
                 .font(&FONT_6X13)
                 .text_color(BinaryColor::On)
                 .build(),
+            minmax_min_position: Point::new(0, 57),
+            minmax_max_position: Point::new(64, 57),
+            minmax_text_style: MonoTextStyleBuilder::new()
+                .font(&FONT_5X8)
+                .text_color(BinaryColor::On)
+                .build(),
+            chart_start_y: 17,
+            chart_height: 39,
+            chart_width: 128,
         })
     }
 
@@ -280,6 +379,58 @@ impl Settings<'_> {
             BatteryLevel::Bat080 => &self.bat[4],
             BatteryLevel::Bat100 => &self.bat[5],
         }
+    }
+
+    /// Clears only the battery icon area (preserves main content)
+    fn clear_battery_area<D>(&self, display: &mut D)
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        // Battery icon is 20x11 pixels at position (108, 1)
+        let battery_area = Rectangle::new(self.bat_position, Size::new(20, 11));
+        battery_area
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+            .draw(display)
+            .unwrap_or_default();
+    }
+
+    /// Clears the main content area (preserves battery icon)
+    fn clear_main_area<D>(&self, display: &mut D)
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        // Clear everything except the battery icon area
+        // Clear the main content area (everything to the left of battery icon)
+        #[allow(clippy::cast_sign_loss)]
+        let main_left_area = Rectangle::new(Point::new(0, 0), Size::new(self.bat_position.x.max(0) as u32, 64));
+        main_left_area
+            .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+            .draw(display)
+            .unwrap_or_default();
+
+        // Clear the area below the battery icon (y > battery_bottom)
+        let battery_bottom = self.bat_position.y + 11; // Battery icon is 11 pixels tall
+        if battery_bottom < 64 {
+            #[allow(clippy::cast_sign_loss)]
+            let main_bottom_area = Rectangle::new(
+                Point::new(self.bat_position.x, battery_bottom),
+                Size::new(20, (64 - battery_bottom).max(0) as u32),
+            );
+            main_bottom_area
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::Off))
+                .draw(display)
+                .unwrap_or_default();
+        }
+    }
+
+    /// Helper function to draw the battery icon
+    fn draw_battery_icon<D>(&self, display: &mut D, battery_level: &BatteryLevel)
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        let battery_icon = self.get_battery_icon(battery_level);
+        let bat_image = Image::new(battery_icon, self.bat_position);
+        bat_image.draw(&mut display.color_converted()).unwrap_or_default();
     }
 
     /// Draws an initialization message when no sensor data is available
@@ -356,6 +507,188 @@ impl Settings<'_> {
         .draw(display)
         .unwrap_or_default();
     }
+
+    /// Draws CO2 history bar chart to the display
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    fn draw_co2_history<D>(&self, display: &mut D, co2_history: &[u16])
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        // Draw the title "CO2 history" where air quality normally appears
+        Text::with_baseline(
+            "CO2 history",
+            self.air_quality_position,
+            self.air_quality_text_style,
+            Baseline::Top,
+        )
+        .draw(display)
+        .unwrap_or_default();
+
+        if co2_history.is_empty() {
+            // Show message if no history available
+            Text::with_baseline("No data yet", self.co2_position, self.co2_text_style, Baseline::Top)
+                .draw(display)
+                .unwrap_or_default();
+            return;
+        }
+
+        // Find min and max CO2 values for scaling
+        let min_co2 = *co2_history.iter().min().unwrap_or(&0);
+        let max_co2 = *co2_history.iter().max().unwrap_or(&1000);
+
+        // Avoid division by zero
+        let range = if max_co2 > min_co2 { max_co2 - min_co2 } else { 1 };
+
+        // Bar chart area: configured in Settings
+        let chart_start_y = self.chart_start_y;
+        let chart_height = self.chart_height;
+        let chart_width = self.chart_width;
+        #[allow(clippy::cast_possible_truncation)]
+        let bar_width = chart_width / co2_history.len().max(1) as i32;
+
+        // Draw bars
+        for (i, &co2_value) in co2_history.iter().enumerate() {
+            // Calculate bar height (scaled to chart area)
+            let normalized_value = co2_value.saturating_sub(min_co2);
+            let bar_height = if range > 0 {
+                (i32::from(normalized_value) * chart_height) / i32::from(range)
+            } else {
+                1
+            };
+
+            // Calculate bar position
+            #[allow(clippy::cast_possible_truncation)]
+            let bar_x = i as i32 * bar_width;
+            let bar_y = chart_start_y + chart_height - bar_height; // Draw from bottom up
+
+            // Draw the bar
+            let bar_rect = Rectangle::new(
+                Point::new(bar_x, bar_y),
+                Size::new(
+                    (bar_width - 1).max(0) as u32, // -1 for spacing between bars, ensure non-negative
+                    bar_height.max(0) as u32,
+                ),
+            );
+            bar_rect
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(display)
+                .unwrap_or_default();
+        }
+
+        // Draw min/max labels - using configured positions and smaller font
+        let mut min_text: String<16> = String::new();
+        let _ = write!(min_text, "Min: {min_co2}");
+        Text::with_baseline(
+            &min_text,
+            self.minmax_min_position,
+            self.minmax_text_style,
+            Baseline::Top,
+        )
+        .draw(display)
+        .unwrap_or_default();
+
+        let mut max_text: String<16> = String::new();
+        let _ = write!(max_text, "Max: {max_co2}");
+        Text::with_baseline(
+            &max_text,
+            self.minmax_max_position,
+            self.minmax_text_style,
+            Baseline::Top,
+        )
+        .draw(display)
+        .unwrap_or_default();
+    }
+
+    /// Draws `EtOH` history bar chart to the display
+    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+    fn draw_etoh_history<D>(&self, display: &mut D, etoh_history: &[u16])
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        // Draw the title "EtOH history" where air quality normally appears
+        Text::with_baseline(
+            "EtOH history",
+            self.air_quality_position,
+            self.air_quality_text_style,
+            Baseline::Top,
+        )
+        .draw(display)
+        .unwrap_or_default();
+
+        if etoh_history.is_empty() {
+            // Show message if no history available
+            Text::with_baseline("No data yet", self.co2_position, self.co2_text_style, Baseline::Top)
+                .draw(display)
+                .unwrap_or_default();
+            return;
+        }
+
+        // Find min and max EtOH values for scaling
+        let min_etoh = *etoh_history.iter().min().unwrap_or(&0);
+        let max_etoh = *etoh_history.iter().max().unwrap_or(&1000);
+
+        // Avoid division by zero
+        let range = if max_etoh > min_etoh { max_etoh - min_etoh } else { 1 };
+
+        // Bar chart area: configured in Settings
+        let chart_start_y = self.chart_start_y;
+        let chart_height = self.chart_height;
+        let chart_width = self.chart_width;
+        #[allow(clippy::cast_possible_truncation)]
+        let bar_width = chart_width / etoh_history.len().max(1) as i32;
+
+        // Draw bars
+        for (i, &etoh_value) in etoh_history.iter().enumerate() {
+            // Calculate bar height (scaled to chart area)
+            let normalized_value = etoh_value.saturating_sub(min_etoh);
+            let bar_height = if range > 0 {
+                (i32::from(normalized_value) * chart_height) / i32::from(range)
+            } else {
+                1
+            };
+
+            // Calculate bar position
+            #[allow(clippy::cast_possible_truncation)]
+            let bar_x = i as i32 * bar_width;
+            let bar_y = chart_start_y + chart_height - bar_height; // Draw from bottom up
+
+            // Draw the bar
+            let bar_rect = Rectangle::new(
+                Point::new(bar_x, bar_y),
+                Size::new(
+                    (bar_width - 1).max(0) as u32, // -1 for spacing between bars, ensure non-negative
+                    bar_height.max(0) as u32,
+                ),
+            );
+            bar_rect
+                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
+                .draw(display)
+                .unwrap_or_default();
+        }
+
+        // Draw min/max labels - using configured positions and smaller font
+        let mut min_text: String<16> = String::new();
+        let _ = write!(min_text, "Min: {min_etoh}");
+        Text::with_baseline(
+            &min_text,
+            self.minmax_min_position,
+            self.minmax_text_style,
+            Baseline::Top,
+        )
+        .draw(display)
+        .unwrap_or_default();
+
+        let mut max_text: String<16> = String::new();
+        let _ = write!(max_text, "Max: {max_etoh}");
+        Text::with_baseline(
+            &max_text,
+            self.minmax_max_position,
+            self.minmax_text_style,
+            Baseline::Top,
+        )
+        .draw(display)
+        .unwrap_or_default();
+    }
 }
 
 /// Holds the current state of the display, including battery level and sensor data
@@ -366,6 +699,12 @@ struct DisplayState {
     is_charging: bool,
     /// Last sensor data for redrawing
     last_sensor_data: Option<SensorData>,
+    /// CO2 history buffer (last 10 measurements)
+    co2_history: Vec<u16, 10>,
+    /// `EtOH` history buffer (last 10 measurements)
+    etoh_history: Vec<u16, 10>,
+    /// Current display mode
+    display_mode: DisplayMode,
 }
 
 /// Holds the sensor data to be displayed
@@ -390,7 +729,54 @@ impl DisplayState {
             battery_percent: 0,
             is_charging: false,
             last_sensor_data: None,
+            co2_history: Vec::new(),
+            etoh_history: Vec::new(),
+            display_mode: DisplayMode::RawData,
         }
+    }
+
+    /// Adds a CO2 measurement to the history buffer
+    fn add_co2_measurement(&mut self, co2: u16) {
+        if self.co2_history.len() >= 10 {
+            // Remove the oldest measurement if buffer is full
+            self.co2_history.remove(0);
+        }
+        // Add the new measurement (ignore if push fails - shouldn't happen due to above check)
+        let _ = self.co2_history.push(co2);
+    }
+
+    /// Adds an `EtOH` measurement to the history buffer
+    fn add_etoh_measurement(&mut self, etoh: u16) {
+        if self.etoh_history.len() >= 10 {
+            // Remove the oldest measurement if buffer is full
+            self.etoh_history.remove(0);
+        }
+        // Add the new measurement (ignore if push fails - shouldn't happen due to above check)
+        let _ = self.etoh_history.push(etoh);
+    }
+
+    /// Toggles the display mode between raw data, CO2 history, and `EtOH` history
+    const fn toggle_display_mode(&mut self) {
+        self.display_mode = match self.display_mode {
+            DisplayMode::RawData => DisplayMode::Co2History,
+            DisplayMode::Co2History => DisplayMode::EtohHistory,
+            DisplayMode::EtohHistory => DisplayMode::RawData,
+        };
+    }
+
+    /// Gets the current display mode
+    const fn get_display_mode(&self) -> DisplayMode {
+        self.display_mode
+    }
+
+    /// Gets the CO2 history for drawing charts
+    fn get_co2_history(&self) -> &[u16] {
+        &self.co2_history
+    }
+
+    /// Gets the `EtOH` history for drawing charts
+    fn get_etoh_history(&self) -> &[u16] {
+        &self.etoh_history
     }
 
     /// Returns the current battery level based on the battery percentage and charging state
@@ -428,4 +814,15 @@ pub enum BatteryLevel {
     Bat080,
     /// Almost full, most of the run time left
     Bat100,
+}
+
+/// Mode switching task that sends ToggleMode commands every 10 seconds
+#[embassy_executor::task]
+pub async fn mode_switch_task() {
+    loop {
+        Timer::after(TOGGLE_MODE).await;
+
+        // Send toggle mode command
+        send_display_command(DisplayCommand::ToggleMode);
+    }
 }

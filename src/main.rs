@@ -75,6 +75,8 @@ async fn main(spawner: Spawner) {
     #[allow(clippy::unwrap_used)]
     spawner.spawn(display::display_task(i2c_device_ssd1306)).unwrap();
     #[allow(clippy::unwrap_used)]
+    spawner.spawn(display::mode_switch_task()).unwrap();
+    #[allow(clippy::unwrap_used)]
     spawner.spawn(watchdog::watchdog_task(p.WATCHDOG)).unwrap();
     #[allow(clippy::unwrap_used)]
     spawner.spawn(orchestrate::orchestrate_task()).unwrap();
