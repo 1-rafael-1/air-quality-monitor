@@ -69,8 +69,6 @@ enum DisplayMode {
     RawData,
     /// Show CO2 history bar chart
     Co2History,
-    /// Show `EtOH` history bar chart
-    EtohHistory,
 }
 
 /// Triggers a display update with the provided command
@@ -165,9 +163,6 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                 // Add CO2 measurement to history
                 state.add_co2_measurement(co2);
 
-                // Add EtOH measurement to history
-                state.add_etoh_measurement(etoh);
-
                 // Clear main content area (preserves battery icon)
                 settings.clear_main_area(&mut display.color_converted());
 
@@ -178,9 +173,6 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                     }
                     DisplayMode::Co2History => {
                         settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
-                    }
-                    DisplayMode::EtohHistory => {
-                        settings.draw_etoh_history(&mut display.color_converted(), state.get_etoh_history());
                     }
                 }
 
@@ -217,10 +209,6 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                                 state.toggle_display_mode();
                                 attempts += 1;
                             }
-                            DisplayMode::EtohHistory if state.get_etoh_history().is_empty() => {
-                                state.toggle_display_mode();
-                                attempts += 1;
-                            }
                             _ => break, // Found a valid mode or back to RawData
                         }
                     }
@@ -235,9 +223,6 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                         }
                         DisplayMode::Co2History => {
                             settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
-                        }
-                        DisplayMode::EtohHistory => {
-                            settings.draw_etoh_history(&mut display.color_converted(), state.get_etoh_history());
                         }
                     }
                 } else {
@@ -598,97 +583,6 @@ impl Settings<'_> {
         .draw(display)
         .unwrap_or_default();
     }
-
-    /// Draws `EtOH` history bar chart to the display
-    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap, clippy::cast_sign_loss)]
-    fn draw_etoh_history<D>(&self, display: &mut D, etoh_history: &[u16])
-    where
-        D: DrawTarget<Color = BinaryColor>,
-    {
-        // Draw the title "EtOH history" where air quality normally appears
-        Text::with_baseline(
-            "EtOH history",
-            self.air_quality_position,
-            self.air_quality_text_style,
-            Baseline::Top,
-        )
-        .draw(display)
-        .unwrap_or_default();
-
-        if etoh_history.is_empty() {
-            // Show message if no history available
-            Text::with_baseline("No data yet", self.co2_position, self.co2_text_style, Baseline::Top)
-                .draw(display)
-                .unwrap_or_default();
-            return;
-        }
-
-        // Find min and max EtOH values for scaling
-        let min_etoh = *etoh_history.iter().min().unwrap_or(&0);
-        let max_etoh = *etoh_history.iter().max().unwrap_or(&1000);
-
-        // Avoid division by zero
-        let range = if max_etoh > min_etoh { max_etoh - min_etoh } else { 1 };
-
-        // Bar chart area: configured in Settings
-        let chart_start_y = self.chart_start_y;
-        let chart_height = self.chart_height;
-        let chart_width = self.chart_width;
-        #[allow(clippy::cast_possible_truncation)]
-        let bar_width = chart_width / etoh_history.len().max(1) as i32;
-
-        // Draw bars
-        for (i, &etoh_value) in etoh_history.iter().enumerate() {
-            // Calculate bar height (scaled to chart area)
-            let normalized_value = etoh_value.saturating_sub(min_etoh);
-            let bar_height = if range > 0 {
-                (i32::from(normalized_value) * chart_height) / i32::from(range)
-            } else {
-                1
-            };
-
-            // Calculate bar position
-            #[allow(clippy::cast_possible_truncation)]
-            let bar_x = i as i32 * bar_width;
-            let bar_y = chart_start_y + chart_height - bar_height; // Draw from bottom up
-
-            // Draw the bar
-            let bar_rect = Rectangle::new(
-                Point::new(bar_x, bar_y),
-                Size::new(
-                    (bar_width - 1).max(0) as u32, // -1 for spacing between bars, ensure non-negative
-                    bar_height.max(0) as u32,
-                ),
-            );
-            bar_rect
-                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-                .draw(display)
-                .unwrap_or_default();
-        }
-
-        // Draw min/max labels - using configured positions and smaller font
-        let mut min_text: String<16> = String::new();
-        let _ = write!(min_text, "Min: {min_etoh}");
-        Text::with_baseline(
-            &min_text,
-            self.minmax_min_position,
-            self.minmax_text_style,
-            Baseline::Top,
-        )
-        .draw(display)
-        .unwrap_or_default();
-
-        let mut max_text: String<16> = String::new();
-        let _ = write!(max_text, "Max: {max_etoh}");
-        Text::with_baseline(
-            &max_text,
-            self.minmax_max_position,
-            self.minmax_text_style,
-            Baseline::Top,
-        )
-        .draw(display)
-        .unwrap_or_default();
-    }
 }
 
 /// Holds the current state of the display, including battery level and sensor data
@@ -701,8 +595,6 @@ struct DisplayState {
     last_sensor_data: Option<SensorData>,
     /// CO2 history buffer (last 10 measurements)
     co2_history: Vec<u16, 10>,
-    /// `EtOH` history buffer (last 10 measurements)
-    etoh_history: Vec<u16, 10>,
     /// Current display mode
     display_mode: DisplayMode,
 }
@@ -730,7 +622,6 @@ impl DisplayState {
             is_charging: false,
             last_sensor_data: None,
             co2_history: Vec::new(),
-            etoh_history: Vec::new(),
             display_mode: DisplayMode::RawData,
         }
     }
@@ -745,22 +636,11 @@ impl DisplayState {
         let _ = self.co2_history.push(co2);
     }
 
-    /// Adds an `EtOH` measurement to the history buffer
-    fn add_etoh_measurement(&mut self, etoh: u16) {
-        if self.etoh_history.len() >= 10 {
-            // Remove the oldest measurement if buffer is full
-            self.etoh_history.remove(0);
-        }
-        // Add the new measurement (ignore if push fails - shouldn't happen due to above check)
-        let _ = self.etoh_history.push(etoh);
-    }
-
-    /// Toggles the display mode between raw data, CO2 history, and `EtOH` history
+    /// Toggles the display mode between raw data and CO2 history
     const fn toggle_display_mode(&mut self) {
         self.display_mode = match self.display_mode {
             DisplayMode::RawData => DisplayMode::Co2History,
-            DisplayMode::Co2History => DisplayMode::EtohHistory,
-            DisplayMode::EtohHistory => DisplayMode::RawData,
+            DisplayMode::Co2History => DisplayMode::RawData,
         };
     }
 
@@ -772,11 +652,6 @@ impl DisplayState {
     /// Gets the CO2 history for drawing charts
     fn get_co2_history(&self) -> &[u16] {
         &self.co2_history
-    }
-
-    /// Gets the `EtOH` history for drawing charts
-    fn get_etoh_history(&self) -> &[u16] {
-        &self.etoh_history
     }
 
     /// Returns the current battery level based on the battery percentage and charging state
