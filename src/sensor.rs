@@ -13,6 +13,8 @@ use ens160_aq::{
     Ens160,
     data::{AirQualityIndex, InterruptPinConfig, OperationMode, ValidityFlag},
 };
+use heapless::Vec;
+use moving_median::MovingMedian;
 use panic_probe as _;
 
 use crate::{
@@ -28,6 +30,12 @@ const WARMUP_TIME: u64 = 180;
 
 /// Idle time for ENS160 sensor in seconds to conserve power
 const IDLE_TIME: u64 = 120;
+
+/// Number of readings for ENS160 median calculation
+const ENS160_MEDIAN_READINGS: usize = 3;
+
+/// Interval between ENS160 readings for median calculation (in seconds)
+const ENS160_READ_INTERVAL: u64 = 10;
 
 /// Initialize the AHT21 sensor
 async fn initialize_aht21(
@@ -117,38 +125,85 @@ async fn read_aht21_data(
 }
 
 /// Read data from ENS160 sensor with temperature and humidity compensation
+/// Uses moving median of 3 readings taken 10 seconds apart, using interrupt to ensure complete data
 async fn read_ens160_data(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
+    int: &mut Input<'static>,
     temp: f32,
     rh: f32,
 ) -> Result<Ens160Readings, &'static str> {
-    let status = ens160.get_status().await.map_err(|_| "Failed to get ENS160 status")?;
-    info!("ENS160 status: {}", Debug2Format(&status));
+    let mut co2_median = MovingMedian::<f32, ENS160_MEDIAN_READINGS>::new();
+    let mut etoh_median = MovingMedian::<f32, ENS160_MEDIAN_READINGS>::new();
+    let mut co2_aqi_pairs: Vec<(f32, AirQualityIndex), ENS160_MEDIAN_READINGS> = Vec::new();
 
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    ens160
-        .set_temp_rh_comp(temp, rh as u16)
-        .await
-        .map_err(|_| "Failed to set temperature and humidity compensation")?;
-    Timer::after_millis(100).await;
+    for i in 0..ENS160_MEDIAN_READINGS {
+        info!("ENS160 reading {} of {}", i + 1, ENS160_MEDIAN_READINGS);
 
-    let eco2 = ens160.get_eco2().await.map_err(|_| "Failed to get eCO2")?;
-    let etoh = ens160.get_etoh().await.map_err(|_| "Failed to get ethanol")?;
+        // Wait for interrupt to ensure sensor has new data ready
+        int.wait_for_low().await;
+        info!("ENS160 interrupt received - data ready");
 
-    let aq = ens160
-        .get_airquality_index()
-        .await
-        .map_err(|_| "Failed to get Air Quality Index")?;
+        let status = ens160.get_status().await.map_err(|_| "Failed to get ENS160 status")?;
+        info!("ENS160 status: {}", Debug2Format(&status));
+
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        ens160
+            .set_temp_rh_comp(temp, rh as u16)
+            .await
+            .map_err(|_| "Failed to set temperature and humidity compensation")?;
+        Timer::after_millis(100).await;
+
+        let eco2 = ens160.get_eco2().await.map_err(|_| "Failed to get eCO2")?;
+        let etoh = ens160.get_etoh().await.map_err(|_| "Failed to get ethanol")?;
+        let aq = ens160
+            .get_airquality_index()
+            .await
+            .map_err(|_| "Failed to get Air Quality Index")?;
+
+        let co2_value = f32::from(eco2.get_value());
+        let etoh_value = f32::from(etoh);
+
+        info!(
+            "Reading {}: Air Quality Index: {}, eCO2: {} ppm, Ethanol: {} ppb",
+            i + 1,
+            Debug2Format(&aq),
+            co2_value,
+            etoh_value
+        );
+
+        co2_median.add_value(co2_value);
+        etoh_median.add_value(etoh_value);
+        let _ = co2_aqi_pairs.push((co2_value, aq)); // Store CO2-AQI pair
+
+        // Wait 10 seconds before next reading (except for the last one)
+        if i < ENS160_MEDIAN_READINGS - 1 {
+            info!("Waiting {} seconds before next ENS160 reading", ENS160_READ_INTERVAL);
+            Timer::after_secs(ENS160_READ_INTERVAL).await;
+        }
+    }
+
+    let median_co2 = co2_median.median();
+
+    // Find the AQI that corresponds to the CO2 value closest to the median
+    let air_quality = co2_aqi_pairs
+        .iter()
+        .min_by(|(co2_a, _), (co2_b, _)| {
+            let diff_a = (co2_a - median_co2).abs();
+            let diff_b = (co2_b - median_co2).abs();
+            diff_a.partial_cmp(&diff_b).unwrap_or(core::cmp::Ordering::Equal)
+        })
+        .map(|(_, aqi)| *aqi)
+        .ok_or("No CO2-AQI pairs available")?;
 
     let readings = Ens160Readings {
-        co2: f32::from(eco2.get_value()),
-        etoh: f32::from(etoh),
-        air_quality: aq,
+        co2: median_co2,
+        etoh: etoh_median.median(),
+        air_quality,
     };
 
     info!(
-        "Air Quality Index: {}, eCO2: {} ppm, Ethanol: {} ppb",
-        Debug2Format(&aq),
+        "ENS160 median results - Air Quality Index: {}, eCO2: {} ppm, Ethanol: {} ppb",
+        Debug2Format(&readings.air_quality),
         readings.co2,
         readings.etoh
     );
@@ -280,7 +335,7 @@ pub async fn sensor_task(
         }
 
         // Read ENS160 data using current AHT21 readings for compensation
-        let ens160_result = read_ens160_data(&mut ens160, prev_temp, prev_humidity).await;
+        let ens160_result = read_ens160_data(&mut ens160, &mut ens160_int, prev_temp, prev_humidity).await;
 
         // Put ENS160 to sleep for power conservation immediately after reading
         if let Err(e) = ens160_idle(&mut ens160).await {
