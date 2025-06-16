@@ -65,7 +65,7 @@ async fn main(spawner: Spawner) {
     // Initialize the interrupt pin for ENS160
     let ens160_int = Input::new(p.PIN_18, Pull::Up);
 
-    // Initialize VBUS monitoring
+    // Initialize VBUS monitoring - external pull-down resistor handles logic levels
     let vbus = Input::new(p.PIN_24, Pull::None);
 
     #[allow(clippy::unwrap_used)]

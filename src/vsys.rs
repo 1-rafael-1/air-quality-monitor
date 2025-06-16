@@ -31,7 +31,10 @@ async fn wait_for_vsys_command() -> VsysCommand {
 }
 
 /// Interval for periodic voltage measurements
-static INTERVAL: Duration = Duration::from_secs(300);
+static INTERVAL: Duration = Duration::from_secs(15);
+
+/// Voltage threshold for determining charging state (above this = charging)
+const CHARGING_VOLTAGE_THRESHOLD: f32 = 4.4;
 
 /// Median window size for voltage measurements
 const MEDIAN_WINDOW_SIZE: usize = 3;
@@ -86,8 +89,16 @@ pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<
             }
         }
 
-        let battery_percentage = voltage_to_percentage(voltage_median.median());
+        let voltage = voltage_median.median();
+        let battery_percentage = voltage_to_percentage(voltage);
+
+        // Determine charging state based on VSYS voltage
+        let is_charging = voltage > CHARGING_VOLTAGE_THRESHOLD;
+        info!("VSYS voltage: {}V, charging: {}", voltage, is_charging);
+
+        // Send both battery level and charging state
         send_event(Event::BatteryLevel(battery_percentage)).await;
+        send_event(Event::BatteryCharging(is_charging)).await;
     }
 }
 

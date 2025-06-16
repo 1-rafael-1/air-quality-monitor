@@ -10,7 +10,7 @@ use embassy_rp::{
 };
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
-    signal::Signal,
+    channel::Channel,
 };
 use embassy_time::{Duration, Timer};
 use embedded_graphics::{
@@ -32,8 +32,8 @@ use tinybmp::Bmp;
 
 use crate::watchdog::trigger_watchdog_reset;
 
-/// Signal for triggering state updates
-pub static DISPLAY: Signal<CriticalSectionRawMutex, DisplayCommand> = Signal::new();
+/// Channel for triggering state updates  
+pub static DISPLAY_CHANNEL: Channel<CriticalSectionRawMutex, DisplayCommand, 3> = Channel::new();
 
 /// Duration for toggling display modes
 static TOGGLE_MODE: Duration = Duration::from_secs(10);
@@ -72,13 +72,13 @@ enum DisplayMode {
 }
 
 /// Triggers a display update with the provided command
-pub fn send_display_command(command: DisplayCommand) {
-    DISPLAY.signal(command);
+pub async fn send_display_command(command: DisplayCommand) {
+    DISPLAY_CHANNEL.send(command).await;
 }
 
 /// Waits for next indicator state change signal
 async fn wait_for_display_command() -> DisplayCommand {
-    DISPLAY.wait().await
+    DISPLAY_CHANNEL.receive().await
 }
 
 #[embassy_executor::task]
@@ -698,6 +698,6 @@ pub async fn mode_switch_task() {
         Timer::after(TOGGLE_MODE).await;
 
         // Send toggle mode command
-        send_display_command(DisplayCommand::ToggleMode);
+        send_display_command(DisplayCommand::ToggleMode).await;
     }
 }

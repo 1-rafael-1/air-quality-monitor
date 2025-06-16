@@ -15,7 +15,6 @@ pub async fn vbus_monitor_task(mut vbus: Input<'static>) {
         send_event(Event::BatteryCharging(is_charging)).await;
 
         vbus.wait_for_any_edge().await;
-
         // Small delay to debounce
         Timer::after_millis(200).await;
     }

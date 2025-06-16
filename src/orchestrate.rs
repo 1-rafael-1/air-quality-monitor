@@ -11,12 +11,12 @@ use crate::{
 pub async fn orchestrate_task() {
     loop {
         let event = receive_event().await;
-        process_event(event);
+        process_event(event).await;
     }
 }
 
 /// Processes the received event and sends appropriate commands to other components
-fn process_event(event: Event) {
+async fn process_event(event: Event) {
     match event {
         Event::SensorData {
             temperature,
@@ -31,16 +31,17 @@ fn process_event(event: Event) {
                 co2,
                 etoh,
                 air_quality,
-            });
+            })
+            .await;
         }
         Event::BatteryCharging(is_charging) => {
-            send_display_command(DisplayCommand::BatteryCharging(is_charging));
+            send_display_command(DisplayCommand::BatteryCharging(is_charging)).await;
             if !is_charging {
                 send_vsys_command(VsysCommand::MakeMeasurement);
             }
         }
         Event::BatteryLevel(level) => {
-            send_display_command(DisplayCommand::UpdateBatteryPercentage(level));
+            send_display_command(DisplayCommand::UpdateBatteryPercentage(level)).await;
         }
     }
 }
