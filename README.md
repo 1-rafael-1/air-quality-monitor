@@ -24,8 +24,12 @@ The device features a custom 3D-printed enclosure designed for portability and s
 - `Back Lid.3mf` - Battery compartment cover
 - `EnclosureComplete.FCStd` - Complete FreeCAD project file
 
-![Enclosure](enclosure/enclosure.png)
-![Lid Detail](enclosure/lid.png)
+<table>
+<tr>
+<td><img src="enclosure/enclosure.png" alt="Enclosure" width="400"/></td>
+<td><img src="enclosure/lid.png" alt="Lid Detail" width="186"/></td>
+</tr>
+</table>
 
 ## Components
 
