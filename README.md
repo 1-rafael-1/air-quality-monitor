@@ -4,32 +4,21 @@ A compact, battery-powered air quality monitoring device built with Rust and a W
 
 **⚠️ Educational Project Notice**: This is a hobby project developed for educational purposes only.
 
-## How It Works
-
-The device operates on a low-power cycle to maximize battery life:
-
-1. **Sensor Reading**: Collects data from ENS160 (air quality) and AHT21 (temperature/humidity) sensors every few minutes
-2. **Data Processing**: Uses median filtering on air quality readings to reduce noise
-3. **Display Updates**: Shows current readings and battery status on a 128x64 OLED display
-4. **Power Management**: Automatically enters idle modes between readings and monitors battery voltage
-5. **Mode Switching**: Automatically cycles between sensor data and CO2 history views every 10 seconds
-
-## Enclosure
-
-The device features a custom 3D-printed enclosure designed for portability and sensor access.
-
-**3D Print Files**: All enclosure files are available in the [`enclosure/`](./enclosure/) directory:
-
-- `Main Body.3mf` - Main housing with sensor openings
-- `Back Lid.3mf` - Battery compartment cover
-- `EnclosureComplete.FCStd` - Complete FreeCAD project file
+## Finished Device
 
 <table>
 <tr>
-<td><img src="enclosure/enclosure.png" alt="Enclosure" width="400"/></td>
-<td><img src="enclosure/lid.png" alt="Lid Detail" width="186"/></td>
+<td><img src="readme_media/finished_device.png" alt="Finished Air Quality Monitor Device" width="400"/></td>
+<td><img src="readme_media/finished_device_values.png" alt="Device Display Showing Values" width="400"/></td>
 </tr>
 </table>
+
+## How It Works
+
+1. **Sensor Reading**: Collects data from ENS160 (air quality) and AHT21 (temperature/humidity) sensors every 5.5 minutes
+2. **Data Processing**: Uses median filtering on air quality readings to reduce noise
+3. **Display Updates**: Shows current readings and battery status on a 128x64 OLED display, changing between data and bar graph views every 10 seconds
+4. **Power Management**: Reduced clock speed (18MHz) and core voltage to conserve power. Send ens160 to sleep mode when not reading data. The device consumers around 25-27mA on average, so the device can run for several days on a 2500mAh battery.
 
 ## Components
 
@@ -39,6 +28,8 @@ The device features a custom 3D-printed enclosure designed for portability and s
 | ENS160 + AHT21 Module | Combined air quality and temperature/humidity sensor board. There are cheap combined boards available | Environmental monitoring |
 | SSD1306 | 128x64 OLED Display, yellow/blue in my case here but monochrome or blue will work just as well| Data visualization |
 | LiPo Battery | 3.7V rechargeable battery. I use 2500mA, 7 x 40 x 60mm with a 1.25mm connector | Portable power source |
+| Slide Switch | Slide switch to control power | Power management |
+| 2K2 Resistor | Pull-down resistor for RP2350 VBUS pin | USB power detection |
 
 ## Hardware Connections
 
@@ -77,6 +68,46 @@ Both of these are already connected on the Waveshare board, no additional wiring
 
 The Waveshare board has built-in battery charging and power management, so no additional components are required.
 In case you want to use i.e. a Pi Pico 2, You need to add a charger board and appropriate circuit. The Pi Pico 2 datasheet has instructions.
+
+## Assembly and Enclosure
+
+### Electronics Assembly
+
+Wire the components according to the hardware connections above. For the slide switch, cut the ground wire of the battery connector and connect it to the switch.
+
+<table>
+<tr>
+<td><img src="readme_media/assembly_electronics.png" alt="Electronics Assembly" width="400"/></td>
+</tr>
+</table>
+
+### 3D-Printed Enclosure
+
+The device features a custom 3D-printed enclosure.
+
+**3D Print Files**: All enclosure files are available in the [`enclosure/`](./enclosure/) directory:
+
+- `Main Body.3mf` - Main housing with sensor openings
+- `Back Lid.3mf` - Battery compartment cover
+- `EnclosureComplete.FCStd` - Body FreeCAD file
+- `Back Lid.FCStd` - Back lid FreeCAD file
+
+<table>
+<tr>
+<td><img src="enclosure/enclosure.png" alt="3D Printed Enclosure" width="400"/></td>
+<td><img src="enclosure/lid.png" alt="Enclosure Lid Detail" width="186"/></td>
+</tr>
+</table>
+
+### Enclosure Assembly
+
+After printing the enclosure parts, assemble the electronics into the housing. The main body provides openings for sensor airflow while protecting the internal components.
+
+<table>
+<tr>
+<td><img src="readme_media/assembly_enclosure.png" alt="Enclosure Assembly Process" width="400"/></td>
+</tr>
+</table>
 
 ## Code Structure
 
