@@ -1,14 +1,12 @@
 //! VSYS voltage measurement task
 
-use defmt::{Format, error, info};
-use embassy_futures::select::{Either, select};
+use defmt::{error, info};
 use embassy_rp::{
     Peri,
     adc::{Adc, Async, Channel, Config, Error},
     gpio::Pull,
     peripherals::{ADC, PIN_29},
 };
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
 use embassy_time::{Duration, Timer, with_timeout};
 use moving_median::MovingMedian;
 
@@ -17,34 +15,14 @@ use crate::{
     event::{Event, send_event},
 };
 
-/// Signal for triggering state updates
-pub static VSYS: Signal<CriticalSectionRawMutex, VsysCommand> = Signal::new();
-
-/// Triggers a display update with the provided command
-pub fn send_vsys_command(command: VsysCommand) {
-    VSYS.signal(command);
-}
-
-/// Waits for next indicator state change signal
-async fn wait_for_vsys_command() -> VsysCommand {
-    VSYS.wait().await
-}
-
 /// Interval for periodic voltage measurements
-static INTERVAL: Duration = Duration::from_secs(15);
+static INTERVAL: Duration = Duration::from_secs(4);
 
 /// Voltage threshold for determining charging state (above this = charging)
 const CHARGING_VOLTAGE_THRESHOLD: f32 = 4.4;
 
-/// Median window size for voltage measurements
-const MEDIAN_WINDOW_SIZE: usize = 3;
-
-/// Command to trigger a voltage measurement
-#[derive(PartialEq, Eq, Format)]
-pub enum VsysCommand {
-    /// Trigger a voltage measurement
-    MakeMeasurement,
-}
+/// Median window size for voltage measurements when on battery power
+const MEDIAN_WINDOW_SIZE: usize = 5;
 
 #[embassy_executor::task]
 pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<'static, PIN_29>) {
@@ -52,17 +30,9 @@ pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<
     info!("VSYS voltage task initialized successfully");
 
     loop {
-        // Wait for command or periodic measurement trigger
-        let meas_target_cnt = match select(wait_for_vsys_command(), Timer::after(INTERVAL)).await {
-            Either::First(command) => {
-                info!("VSYS command received: {}", command);
-                MEDIAN_WINDOW_SIZE
-            }
-            Either::Second(()) => {
-                info!("VSYS periodic measurement triggered");
-                1
-            }
-        };
+        // Wait for periodic measurement trigger
+        Timer::after(INTERVAL).await;
+        info!("VSYS periodic measurement triggered");
 
         let adc_peri = p_adc.reborrow();
         let pin_peri = p_pin29.reborrow();
@@ -73,32 +43,47 @@ pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<
             let mut channel = Channel::new_pin(pin_peri, Pull::None);
             Timer::after_millis(100).await; // small delay to ensure ADC is ready
 
-            let mut meas_is_cnt: usize = 0;
-            while meas_is_cnt < meas_target_cnt {
-                match read_voltage(&mut adc, &mut channel).await {
-                    Ok(value) => {
-                        info!("VSYS voltage measurement: {}V", value);
-                        voltage_median.add_value(value);
-                        meas_is_cnt += 1;
+            match read_voltage(&mut adc, &mut channel).await {
+                Ok(voltage) => {
+                    info!("VSYS voltage measurement: {}V", voltage);
+
+                    // Determine charging state based on VSYS voltage
+                    let is_charging = voltage > CHARGING_VOLTAGE_THRESHOLD;
+
+                    let final_voltage = if is_charging {
+                        // When charging/external power, use direct measurement (no median filtering)
+                        voltage
+                    } else {
+                        // When on battery power, use moving median of 5 measurements
+                        voltage_median.add_value(voltage);
+                        voltage_median.median()
+                    };
+
+                    let battery_percentage = voltage_to_percentage(final_voltage);
+
+                    info!("VSYS final voltage: {}V, charging: {}", final_voltage, is_charging);
+
+                    // Send battery level and charging state events
+                    if is_charging {
+                        send_event(Event::BatteryCharging).await;
+                    } else {
+                        send_event(Event::BatteryLevel(battery_percentage)).await;
                     }
-                    Err(e) => {
-                        error!("Could not read voltage: {}", e);
-                    }
+
+                    // // Send battery level always
+                    // send_event(Event::BatteryLevel(battery_percentage)).await;
+
+                    // // Send charging state only if it changed
+                    // if is_charging != last_charging_state {
+                    //     send_event(Event::BatteryCharging(is_charging)).await;
+                    //     last_charging_state = is_charging;
+                    // }
                 }
-                Timer::after(Duration::from_millis(20)).await; // small delay between measurements
+                Err(e) => {
+                    error!("Could not read voltage: {}", e);
+                }
             }
         }
-
-        let voltage = voltage_median.median();
-        let battery_percentage = voltage_to_percentage(voltage);
-
-        // Determine charging state based on VSYS voltage
-        let is_charging = voltage > CHARGING_VOLTAGE_THRESHOLD;
-        info!("VSYS voltage: {}V, charging: {}", voltage, is_charging);
-
-        // Send both battery level and charging state
-        send_event(Event::BatteryLevel(battery_percentage)).await;
-        send_event(Event::BatteryCharging(is_charging)).await;
     }
 }
 
@@ -135,8 +120,8 @@ fn adc_value_to_voltage(adc_value: u16) -> f32 {
 
 /// Converts voltage to battery percentage
 fn voltage_to_percentage(voltage: f32) -> u8 {
-    const MIN_VOLTAGE: f32 = 2.8; // 0% battery
-    const MAX_VOLTAGE: f32 = 4.1; // 100% battery
+    const MIN_VOLTAGE: f32 = 3.0; // 0% battery
+    const MAX_VOLTAGE: f32 = 4.2; // 100% battery
 
     let percentage = if voltage >= MAX_VOLTAGE {
         100.0

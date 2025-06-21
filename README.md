@@ -18,18 +18,18 @@ A compact, battery-powered air quality monitoring device built with Rust and a W
 1. **Sensor Reading**: Collects data from ENS160 (air quality) and AHT21 (temperature/humidity) sensors every 5.5 minutes
 2. **Data Processing**: Uses median filtering on air quality readings to reduce noise
 3. **Display Updates**: Shows current readings and battery status on a 128x64 OLED display, changing between data and bar graph views every 10 seconds
-4. **Power Management**: Reduced clock speed (18MHz) and core voltage to conserve power. Send ens160 to sleep mode when not reading data. The device consumers around 25-27mA on average, so the device can run for several days on a 2500mAh battery.
+4. **Power Management**: Reduced clock speed (18MHz) and core voltage to conserve power. Sends ENS160 to sleep mode when not reading data. The device consumes around 25-27mA on average, so the device can run for several days on a 2500mAh battery.
+5. **Battery Monitoring**: VSYS voltage is measured every 4 seconds to determine battery level and charging state. Uses moving median filtering (5 samples) when on battery power for stable readings, and direct measurements when charging to reduce latency.
 
 ## Components
 
 | Component | Description | Purpose |
 |-----------|-------------|---------|
-| Waveshare RP2350 Board | RP2350-based development board. There are cheaper alternatives available on Aliexpress, so lomng as they have the Pico 2 form factor anda battery connector with charger it should be fine | Core processing and I/O |
+| Waveshare RP2350 Board | RP2350-based development board. There are cheaper alternatives available on AliExpress, so long as they have the Pico 2 form factor and a battery connector with charger it should be fine | Core processing and I/O |
 | ENS160 + AHT21 Module | Combined air quality and temperature/humidity sensor board. There are cheap combined boards available | Environmental monitoring |
-| SSD1306 | 128x64 OLED Display, yellow/blue in my case here but monochrome or blue will work just as well| Data visualization |
+| SSD1306 | 128x64 OLED Display, yellow/blue in my case here but monochrome or blue will work just as well | Data visualization |
 | LiPo Battery | 3.7V rechargeable battery. I use 2500mA, 7 x 40 x 60mm with a 1.25mm connector | Portable power source |
 | Slide Switch | Slide switch to control power | Power management |
-| 2K2 Resistor | Pull-down resistor for RP2350 VBUS pin | USB power detection |
 
 ## Hardware Connections
 
@@ -38,7 +38,7 @@ Connect the components to the Waveshare RP2350 board as follows:
 ### I2C Bus (Shared)
 
 All I2C devices (ENS160 + AHT21 module and SSD1306 display) connect to the same I2C bus.
-Since ENS160 and AHT21 are on the same module, they share the bus anyway and the  SSD1306 display is also connected to the same I2C bus for simplicity.
+Since ENS160 and AHT21 are on the same module, they share the bus anyway and the SSD1306 display is also connected to the same I2C bus for simplicity.
 
 ### ENS160 + AHT21 Module
 
@@ -57,17 +57,16 @@ Since ENS160 and AHT21 are on the same module, they share the bus anyway and the
 
 ### Power Monitoring
 
-Both of these are already connected on the Waveshare board, no additional wiring is needed.
+Power and charging detection is handled through VSYS voltage monitoring due to RP2350 E9 erratum affecting VBUS detection.
 
-- **VBUS**: GPIO 24 (USB power detection)
-- **VSYS**: GPIO 29 (Battery voltage monitoring via ADC)
+- **VSYS**: GPIO 29 (Battery voltage monitoring via ADC and charging detection)
 
 ### Battery
 
 - **Battery**: 3.7V LiPo battery connected to the battery connector on the Waveshare board.
 
 The Waveshare board has built-in battery charging and power management, so no additional components are required.
-In case you want to use i.e. a Pi Pico 2, You need to add a charger board and appropriate circuit. The Pi Pico 2 datasheet has instructions.
+In case you want to use i.e. a Pi Pico 2, you need to add a charger board and appropriate circuit. The Pi Pico 2 datasheet has instructions.
 
 ## Assembly and Enclosure
 
@@ -120,8 +119,8 @@ src/
 ├── display.rs       # SSD1306 OLED display management and UI rendering
 ├── event.rs         # Inter-task communication events
 ├── orchestrate.rs   # Main control loop and data coordination
-├── vbus.rs          # USB power detection
-├── vsys.rs          # Battery voltage monitoring
+├── system_state.rs  # System state management (battery, sensor data, display modes)
+├── vsys.rs          # Battery voltage monitoring and charging detection
 ├── watchdog.rs      # System watchdog
 └── media/           # Bitmap assets for display (battery icons, etc.)
 ```
@@ -131,7 +130,8 @@ src/
 - **Async Architecture**: Uses Embassy framework for task scheduling
 - **Power Optimization**: 18MHz clock, voltage scaling, and idle modes
 - **Median Filtering**: Reduces sensor noise through statistical processing
-- **Battery Monitoring**: Real-time voltage tracking with visual indicators
+- **Battery Monitoring**: VSYS-based voltage tracking with adaptive filtering (median filtering on battery, direct measurement when charging)
+- **Charging Detection**: Automatic detection of charging state via voltage thresholds (works around RP2350 E9 erratum)
 - **Mode Switching**: Automatic display cycling between sensor data and CO2 history views
 
 ## Building and Flashing

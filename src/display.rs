@@ -11,6 +11,7 @@ use embassy_rp::{
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     channel::Channel,
+    mutex::Mutex,
 };
 use embassy_time::{Duration, Timer};
 use embedded_graphics::{
@@ -25,12 +26,15 @@ use embedded_graphics::{
     text::{Baseline, Text},
 };
 use ens160_aq::data::AirQualityIndex;
-use heapless::{String, Vec};
+use heapless::String;
 use panic_probe as _;
 use ssd1306_async::{I2CDisplayInterface, Ssd1306, prelude::*};
 use tinybmp::Bmp;
 
-use crate::watchdog::trigger_watchdog_reset;
+use crate::{
+    system_state::{BatteryLevel, DisplayMode, SensorData, SystemState},
+    watchdog::trigger_watchdog_reset,
+};
 
 /// Channel for triggering state updates  
 pub static DISPLAY_CHANNEL: Channel<CriticalSectionRawMutex, DisplayCommand, 3> = Channel::new();
@@ -55,20 +59,11 @@ pub enum DisplayCommand {
         air_quality: AirQualityIndex,
     },
     /// Update the battery charging state
-    BatteryCharging(bool),
+    UpdateBatteryCharging,
     /// Update the battery level
     UpdateBatteryPercentage(u8),
     /// Toggle display mode (triggered by mode switching task)
     ToggleMode,
-}
-
-/// Display modes for alternating between raw data and history graphs
-#[derive(Debug, PartialEq, Copy, Clone)]
-enum DisplayMode {
-    /// Show raw sensor data
-    RawData,
-    /// Show CO2 history bar chart
-    Co2History,
 }
 
 /// Triggers a display update with the provided command
@@ -83,7 +78,10 @@ async fn wait_for_display_command() -> DisplayCommand {
 
 #[embassy_executor::task]
 #[allow(clippy::too_many_lines)]
-pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>) {
+pub async fn display_task(
+    i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>,
+    shared_state: &'static Mutex<NoopRawMutex, SystemState>,
+) {
     // Initialize the display
     let interface = I2CDisplayInterface::new(i2c_device);
     let mut display =
@@ -128,13 +126,15 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
             return;
         }
     };
-    let mut state = DisplayState::new();
 
     info!("Display task initialized successfully");
 
     // Show initial startup screen
     settings.draw_initialization_message(&mut display.color_converted());
-    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+    {
+        let state = shared_state.lock().await;
+        settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+    }
     if let Err(e) = display.flush().await {
         error!("Failed to flush initial screen (continuing): {}", Debug2Format(&e));
     }
@@ -160,63 +160,19 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                     air_quality,
                 };
 
-                // Add CO2 measurement to history
-                state.add_co2_measurement(co2);
+                // Add CO2 measurement to history and handle display logic
+                {
+                    let mut state = shared_state.lock().await;
+                    state.add_co2_measurement(co2);
+                    state.last_sensor_data = Some(sensor_data.clone());
+                }
 
                 // Clear main content area (preserves battery icon)
                 settings.clear_main_area(&mut display.color_converted());
 
                 // Draw based on current display mode
-                match state.get_display_mode() {
-                    DisplayMode::RawData => {
-                        settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
-                    }
-                    DisplayMode::Co2History => {
-                        settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
-                    }
-                }
-
-                // Draw battery icon
-                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
-
-                // Cache the sensor data for future battery-only updates
-                state.last_sensor_data = Some(sensor_data);
-            }
-            DisplayCommand::BatteryCharging(is_charging) => {
-                state.is_charging = is_charging;
-
-                // Only clear and redraw battery icon area
-                settings.clear_battery_area(&mut display.color_converted());
-                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
-            }
-            DisplayCommand::UpdateBatteryPercentage(bat_percent) => {
-                state.battery_percent = bat_percent;
-
-                // Only clear and redraw battery icon area
-                settings.clear_battery_area(&mut display.color_converted());
-                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
-            }
-            DisplayCommand::ToggleMode => {
-                // Only toggle if we have sensor data
-                if let Some(sensor_data) = state.last_sensor_data.clone() {
-                    state.toggle_display_mode();
-
-                    // If switching to a history mode but no data available, continue toggling until we find a mode with data or get back to RawData
-                    let mut attempts = 0;
-                    while attempts < 3 {
-                        match state.get_display_mode() {
-                            DisplayMode::Co2History if state.get_co2_history().is_empty() => {
-                                state.toggle_display_mode();
-                                attempts += 1;
-                            }
-                            _ => break, // Found a valid mode or back to RawData
-                        }
-                    }
-
-                    // Clear main content area (preserves battery icon)
-                    settings.clear_main_area(&mut display.color_converted());
-
-                    // Redraw with the (potentially adjusted) mode
+                {
+                    let state = shared_state.lock().await;
                     match state.get_display_mode() {
                         DisplayMode::RawData => {
                             settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
@@ -225,14 +181,75 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                             settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
                         }
                     }
+
+                    // Draw battery icon
+                    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+                }
+            }
+            DisplayCommand::UpdateBatteryCharging => {
+                {
+                    let mut state = shared_state.lock().await;
+                    state.set_charging(true);
+                }
+
+                // Only clear and redraw battery icon area
+                settings.clear_battery_area(&mut display.color_converted());
+                {
+                    let state = shared_state.lock().await;
+                    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+                }
+            }
+            DisplayCommand::UpdateBatteryPercentage(bat_percent) => {
+                {
+                    let mut state = shared_state.lock().await;
+                    state.set_charging(false);
+                    state.set_battery_percent(bat_percent);
+                }
+
+                // Only clear and redraw battery icon area
+                settings.clear_battery_area(&mut display.color_converted());
+                {
+                    let state = shared_state.lock().await;
+                    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+                }
+            }
+            DisplayCommand::ToggleMode => {
+                // Only toggle if we have sensor data
+                let sensor_data_option = {
+                    let mut state = shared_state.lock().await;
+
+                    if state.last_sensor_data.is_some() {
+                        state.toggle_display_mode();
+                    }
+                    state.last_sensor_data.clone()
+                };
+
+                settings.clear_main_area(&mut display.color_converted());
+                if let Some(sensor_data) = sensor_data_option {
+                    // Clear main content area (preserves battery icon)
+
+                    // Redraw with the (potentially adjusted) mode
+                    {
+                        let state = shared_state.lock().await;
+                        match state.get_display_mode() {
+                            DisplayMode::RawData => {
+                                settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
+                            }
+                            DisplayMode::Co2History => {
+                                settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
+                            }
+                        }
+                    }
                 } else {
                     // No sensor data yet, clear main area and show initialization message
-                    settings.clear_main_area(&mut display.color_converted());
                     settings.draw_initialization_message(&mut display.color_converted());
                 }
 
                 // Draw battery icon (common to both branches)
-                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+                {
+                    let state = shared_state.lock().await;
+                    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+                }
             }
         }
 
@@ -583,112 +600,6 @@ impl Settings<'_> {
         .draw(display)
         .unwrap_or_default();
     }
-}
-
-/// Holds the current state of the display, including battery level and sensor data
-struct DisplayState {
-    /// Current battery level
-    battery_percent: u8,
-    /// Whether the battery is charging
-    is_charging: bool,
-    /// Last sensor data for redrawing
-    last_sensor_data: Option<SensorData>,
-    /// CO2 history buffer (last 10 measurements)
-    co2_history: Vec<u16, 10>,
-    /// Current display mode
-    display_mode: DisplayMode,
-}
-
-/// Holds the sensor data to be displayed
-#[derive(Clone)]
-struct SensorData {
-    /// Temperature in degrees Celsius
-    temperature: f32,
-    /// Humidity in percentage
-    humidity: f32,
-    /// CO2 level in ppm
-    co2: u16,
-    /// Ethanol level in ppb
-    etoh: u16,
-    /// Air quality index
-    air_quality: AirQualityIndex,
-}
-
-impl DisplayState {
-    /// Creates a new `DisplayState` with default values
-    const fn new() -> Self {
-        Self {
-            battery_percent: 0,
-            is_charging: false,
-            last_sensor_data: None,
-            co2_history: Vec::new(),
-            display_mode: DisplayMode::RawData,
-        }
-    }
-
-    /// Adds a CO2 measurement to the history buffer
-    fn add_co2_measurement(&mut self, co2: u16) {
-        if self.co2_history.len() >= 10 {
-            // Remove the oldest measurement if buffer is full
-            self.co2_history.remove(0);
-        }
-        // Add the new measurement (ignore if push fails - shouldn't happen due to above check)
-        let _ = self.co2_history.push(co2);
-    }
-
-    /// Toggles the display mode between raw data and CO2 history
-    const fn toggle_display_mode(&mut self) {
-        self.display_mode = match self.display_mode {
-            DisplayMode::RawData => DisplayMode::Co2History,
-            DisplayMode::Co2History => DisplayMode::RawData,
-        };
-    }
-
-    /// Gets the current display mode
-    const fn get_display_mode(&self) -> DisplayMode {
-        self.display_mode
-    }
-
-    /// Gets the CO2 history for drawing charts
-    fn get_co2_history(&self) -> &[u16] {
-        &self.co2_history
-    }
-
-    /// Returns the current battery level based on the battery percentage and charging state
-    const fn get_battery_level(&self) -> BatteryLevel {
-        if self.is_charging {
-            BatteryLevel::Charging
-        } else {
-            match self.battery_percent {
-                0..=25 => BatteryLevel::Bat000,  // 26% range - compensates for quick drop
-                26..=45 => BatteryLevel::Bat020, // 20% range - medium compensation
-                46..=65 => BatteryLevel::Bat040, // 20% range - some compensation
-                66..=80 => BatteryLevel::Bat060, // 15% range - less time needed
-                81..=90 => BatteryLevel::Bat080, // 10% range - short time
-                _ => BatteryLevel::Bat100,
-            }
-        }
-    }
-}
-
-/// The Charge Level of the battery
-#[derive(PartialEq, Debug, Clone, Eq)]
-pub enum BatteryLevel {
-    /// Battery is charging
-    Charging,
-    /// Battery levels
-    /// roughly 1/6 of the run time left
-    Bat000,
-    /// roughly 1/3 of the run time left
-    Bat020,
-    /// roughly 3/6 of the run time left
-    Bat040,
-    /// roughly 2/3 fifths of the run time left
-    Bat060,
-    /// roughly 5/6 of the run time left
-    Bat080,
-    /// Almost full, most of the run time left
-    Bat100,
 }
 
 /// Mode switching task that sends ToggleMode commands every 10 seconds

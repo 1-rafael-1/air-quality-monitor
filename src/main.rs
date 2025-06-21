@@ -26,7 +26,7 @@ mod display;
 mod event;
 mod orchestrate;
 mod sensor;
-mod vbus;
+mod system_state;
 mod vsys;
 mod watchdog;
 
@@ -65,23 +65,25 @@ async fn main(spawner: Spawner) {
     // Initialize the interrupt pin for ENS160
     let ens160_int = Input::new(p.PIN_18, Pull::Up);
 
-    // Initialize VBUS monitoring - external pull-down resistor handles logic levels
-    let vbus = Input::new(p.PIN_24, Pull::None);
+    // Initialize shared system state
+    static SYSTEM_STATE: StaticCell<Mutex<NoopRawMutex, system_state::SystemState>> = StaticCell::new();
+    let system_state = SYSTEM_STATE.init(Mutex::new(system_state::SystemState::new()));
 
+    // And spawn the tasks
     #[allow(clippy::unwrap_used)]
     spawner
         .spawn(sensor::sensor_task(i2c_device_aht21, i2c_device_ens160, ens160_int))
         .unwrap();
     #[allow(clippy::unwrap_used)]
-    spawner.spawn(display::display_task(i2c_device_ssd1306)).unwrap();
+    spawner
+        .spawn(display::display_task(i2c_device_ssd1306, system_state))
+        .unwrap();
     #[allow(clippy::unwrap_used)]
     spawner.spawn(display::mode_switch_task()).unwrap();
     #[allow(clippy::unwrap_used)]
     spawner.spawn(watchdog::watchdog_task(p.WATCHDOG)).unwrap();
     #[allow(clippy::unwrap_used)]
     spawner.spawn(orchestrate::orchestrate_task()).unwrap();
-    #[allow(clippy::unwrap_used)]
-    spawner.spawn(vbus::vbus_monitor_task(vbus)).unwrap();
     #[allow(clippy::unwrap_used)]
     spawner.spawn(vsys::vsys_voltage_task(p.ADC, p.PIN_29)).unwrap();
 }

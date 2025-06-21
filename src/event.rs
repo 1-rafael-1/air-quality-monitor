@@ -35,7 +35,7 @@ pub enum Event {
         air_quality: AirQualityIndex,
     },
     /// Battery charging state event (true = charging, false = not charging)
-    BatteryCharging(bool),
+    BatteryCharging,
     /// Battery level event (0-100 percentage)
     BatteryLevel(u8),
 }
