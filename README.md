@@ -18,7 +18,7 @@ A compact, battery-powered air quality monitoring device built with Rust and a W
 1. **Sensor Reading**: Collects data from ENS160 (air quality) and AHT21 (temperature/humidity) sensors every 5.5 minutes
 2. **Data Processing**: Uses median filtering on air quality readings to reduce noise
 3. **Display Updates**: Shows current readings and battery status on a 128x64 OLED display, changing between data and bar graph views every 10 seconds
-4. **Power Management**: Reduced clock speed (18MHz) and core voltage to conserve power. Sends ENS160 to sleep mode when not reading data. The device consumes around 25-27mA on average, so the device can run for several days on a 2500mAh battery.
+4. **Power Management**: Reduced clock speed (18MHz) and core voltage to conserve power. Sends ENS160 to sleep mode when not reading data. The device consumes around 21-22mA on average, allowing it to run for approximately 4 days on a 2500mAh battery.
 5. **Battery Monitoring**: VSYS voltage is measured every 4 seconds to determine battery level and charging state. Uses moving median filtering (5 samples) when on battery power for stable readings, and direct measurements when charging to reduce latency.
 
 ## Components
@@ -28,12 +28,12 @@ A compact, battery-powered air quality monitoring device built with Rust and a W
 | Waveshare RP2350 Board | RP2350-based development board. There are cheaper alternatives available on AliExpress, so long as they have the Pico 2 form factor and a battery connector with charger it should be fine | Core processing and I/O |
 | ENS160 + AHT21 Module | Combined air quality and temperature/humidity sensor board. There are cheap combined boards available | Environmental monitoring |
 | SSD1306 | 128x64 OLED Display, yellow/blue in my case here but monochrome or blue will work just as well | Data visualization |
-| LiPo Battery | 3.7V rechargeable battery. I use 2500mA, 7 x 40 x 60mm with a 1.25mm connector | Portable power source |
+| LiPo Battery | 3.7V rechargeable battery. I use 2500mAh, 7 x 40 x 60mm with a 1.25mm connector | Portable power source |
 | Slide Switch | Slide switch to control power | Power management |
 
 ### Things to know
 
-The ENS160 sensor and AHT21 sensor are on a combined board here, bough very cheap. A EBS160 datasheet and the ENS160 sensor on the board do not always agree on things. The AHT21 may in fact be a AHT20 according to some comments...
+The ENS160 sensor and AHT21 sensor are on a combined board here, bought very cheap. An ENS160 datasheet and the ENS160 sensor on the board do not always agree on things. The AHT21 may in fact be an AHT20 according to some comments...
 
 Here is what I found not being what I expected:
 
@@ -85,7 +85,7 @@ In case you want to use i.e. a Pi Pico 2, you need to add a charger board and ap
 
 On average I measure between 21 and 22mA average current, when supplying 3.7V to the device (which is the nominal voltage for the battery I use).
 
-The baseline for controller and display combined is around 10-11mA, the ens160 sensor draws around 10-11mA when warming up & measuring, the aht21 is negligible. So with these values the device can theoretically run for around 100 hours on a 2500mAh battery, considering the inbuilt charge controller ofthe battery will not let us use more that say 90% of the battery capacity.
+The baseline for controller and display combined is around 10-11mA, the ENS160 sensor draws around 10-11mA when warming up & measuring, the AHT21 is negligible. So with these values the device can theoretically run for around 100 hours on a 2500mAh battery, considering the built-in charge controller of the battery will not let us use more than say 90% of the battery capacity.
 
 Here is a screen capture of the current consumption measured with a Power Profiler Kit II:
 
