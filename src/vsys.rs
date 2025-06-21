@@ -13,6 +13,7 @@ use moving_median::MovingMedian;
 use crate::{
     Irqs,
     event::{Event, send_event},
+    watchdog::{TaskId, report_task_failure, report_task_success},
 };
 
 /// Interval for periodic voltage measurements
@@ -70,17 +71,15 @@ pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<
                         send_event(Event::BatteryLevel(battery_percentage)).await;
                     }
 
-                    // // Send battery level always
-                    // send_event(Event::BatteryLevel(battery_percentage)).await;
-
-                    // // Send charging state only if it changed
-                    // if is_charging != last_charging_state {
-                    //     send_event(Event::BatteryCharging(is_charging)).await;
-                    //     last_charging_state = is_charging;
-                    // }
+                    // Report task success for watchdog health monitoring
+                    report_task_success(TaskId::Vsys).await;
+                    info!("VSYS task: successful iteration, reporting health");
                 }
                 Err(e) => {
                     error!("Could not read voltage: {}", e);
+                    // Report task failure for watchdog health monitoring
+                    report_task_failure(TaskId::Vsys).await;
+                    info!("VSYS task: failed iteration, reporting failure to watchdog");
                 }
             }
         }

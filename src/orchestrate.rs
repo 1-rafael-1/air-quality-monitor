@@ -4,6 +4,7 @@ use crate::{
     display::{DisplayCommand, send_display_command},
     event::{Event, receive_event},
     system_state::{SYSTEM_STATE, SensorData},
+    watchdog::{TaskId, report_task_success},
 };
 
 /// Main coordination task that implements the system's event loop
@@ -87,4 +88,5 @@ async fn process_event(event: Event) {
             }
         }
     }
+    report_task_success(TaskId::Orchestrator).await;
 }

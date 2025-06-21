@@ -33,7 +33,7 @@ use tinybmp::Bmp;
 use crate::{
     event::{Event, send_event},
     system_state::{BatteryLevel, DisplayMode, SYSTEM_STATE, SensorData},
-    watchdog::trigger_watchdog_reset,
+    watchdog::{TaskId, report_task_failure, report_task_success},
 };
 
 /// Channel for triggering state updates  
@@ -86,31 +86,19 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
 
     // Critical initialization - if this fails, we need to reset
     if let Err(e) = display.init().await {
-        error!(
-            "Failed to initialize display: {} - triggering system reset",
-            Debug2Format(&e)
-        );
-        trigger_watchdog_reset();
+        error!("Failed to initialize display: {}", Debug2Format(&e));
         return;
     }
 
     if let Err(e) = display.set_brightness(Brightness::DIMMEST).await {
-        error!(
-            "Failed to set display brightness: {} - triggering system reset",
-            Debug2Format(&e)
-        );
-        trigger_watchdog_reset();
+        error!("Failed to set display brightness: {}t", Debug2Format(&e));
         return;
     }
 
     // Clear the display - this is still critical initialization
     display.clear();
     if let Err(e) = display.flush().await {
-        error!(
-            "Failed to initial display flush: {} - triggering system reset",
-            Debug2Format(&e)
-        );
-        trigger_watchdog_reset();
+        error!("Failed to initial display flush: {}", Debug2Format(&e));
         return;
     }
 
@@ -118,8 +106,7 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
     let settings = match Settings::new() {
         Ok(settings) => settings,
         Err(e) => {
-            error!("Failed to load display assets: {} - triggering system reset", e);
-            trigger_watchdog_reset();
+            error!("Failed to load display assets: {}", e);
             return;
         }
     };
@@ -133,8 +120,12 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
         settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
     }
     if let Err(e) = display.flush().await {
-        error!("Failed to flush initial screen (continuing): {}", Debug2Format(&e));
+        error!("Failed to flush initial screen: {}", Debug2Format(&e));
+        return;
     }
+
+    let task_id = TaskId::Display;
+    report_task_success(task_id).await;
 
     // Main display loop - all errors here are considered transient
     loop {
@@ -218,7 +209,7 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
                     settings.draw_initialization_message(&mut display.color_converted());
                 }
 
-                // Draw battery icon (common to both branches)
+                // Draw battery icon
                 {
                     let state = SYSTEM_STATE.lock().await;
                     settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
@@ -229,6 +220,11 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
         // Flush display - if this fails, it's transient, so we continue
         if let Err(e) = display.flush().await {
             error!("Failed to flush display (continuing): {}", Debug2Format(&e));
+            // Report task failure for watchdog health monitoring (flush failed)
+            report_task_failure(task_id).await;
+        } else {
+            // Report task success for watchdog health monitoring (flush succeeded)
+            report_task_success(task_id).await;
         }
     }
 }
@@ -583,5 +579,8 @@ pub async fn mode_switch_task() {
 
         // Send toggle mode event to orchestrator
         send_event(Event::ToggleDisplayMode).await;
+
+        // Report task success for watchdog health monitoring
+        report_task_success(TaskId::ModeSwitch).await;
     }
 }

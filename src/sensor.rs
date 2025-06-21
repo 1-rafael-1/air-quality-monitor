@@ -19,7 +19,7 @@ use panic_probe as _;
 
 use crate::{
     event::{Event, send_event},
-    watchdog::trigger_watchdog_reset,
+    watchdog::{TaskId, report_task_failure, report_task_success},
 };
 
 /// Temperature offset for AHT21 sensor in degrees Celsius
@@ -61,7 +61,6 @@ async fn initialize_ens160(
             "Failed to initialize ENS160: {} - triggering system reset",
             Debug2Format(&e)
         );
-        trigger_watchdog_reset();
         return None;
     }
     info!("ENS160 initialized successfully");
@@ -278,14 +277,12 @@ pub async fn sensor_task(
     #[allow(clippy::used_underscore_binding)] mut ens160_int: Input<'static>,
 ) {
     let Some(mut aht21) = initialize_aht21(aht21).await else {
-        info!("Failed to initialize AHT21 - triggering system reset");
-        trigger_watchdog_reset();
+        info!("Failed to initialize AHT21");
         return;
     };
 
     let Some(mut ens160) = initialize_ens160(ens160).await else {
-        info!("Failed to initialize ENS160 - triggering system reset");
-        trigger_watchdog_reset();
+        info!("Failed to initialize ENS160");
         return;
     };
 
@@ -303,11 +300,7 @@ pub async fn sensor_task(
             info!("ENS160 interrupt pin configured successfully to {}", val);
         }
         Err(e) => {
-            info!(
-                "Failed to configure ENS160 interrupt pin: {} - triggering system reset",
-                Debug2Format(&e)
-            );
-            trigger_watchdog_reset();
+            info!("Failed to configure ENS160 interrupt pin: {}", Debug2Format(&e));
             return;
         }
     }
@@ -317,6 +310,8 @@ pub async fn sensor_task(
     let mut prev_humidity = 50.0; // Default humidity
 
     info!("Sensor task initialized successfully");
+    let task_id = TaskId::Sensor;
+    report_task_success(task_id).await;
 
     loop {
         // Read AHT21 data after cooling period to get accurate readings
@@ -331,7 +326,7 @@ pub async fn sensor_task(
         // Wake up ENS160 sensor and wait for warmup
         if let Err(e) = ens160_wake(&mut ens160, &mut ens160_int).await {
             info!("ENS160 wake failed (continuing): {}", e);
-            // Continue in the loop - all errors in the loop are considered transient
+            report_task_failure(task_id).await;
         }
 
         // Read ENS160 data using current AHT21 readings for compensation
@@ -340,6 +335,7 @@ pub async fn sensor_task(
         // Put ENS160 to sleep for power conservation immediately after reading
         if let Err(e) = ens160_idle(&mut ens160).await {
             info!("ENS160 sleep failed (continuing): {}", e);
+            report_task_failure(task_id).await;
         }
 
         // Combine readings and send event if both sensors read successfully
@@ -355,15 +351,28 @@ pub async fn sensor_task(
                     air_quality: ens160_readings.air_quality,
                 })
                 .await;
+
+                // Report task success to watchdog
+                report_task_success(task_id).await;
+                info!("Sensor task: successful iteration, reported success to watchdog");
             }
             (Err(ens160_err), Err(aht21_err)) => {
                 info!("Both sensors failed - ENS160: {}, AHT21: {}", ens160_err, aht21_err);
+                // Report task failure to watchdog
+                report_task_failure(task_id).await;
+                info!("Sensor task: failed iteration, reported failure to watchdog");
             }
             (Err(ens160_err), Ok(_)) => {
-                info!("ENS160 reading failed (continuing): {}", ens160_err);
+                info!("ENS160 reading failed: {}", ens160_err);
+                // Report task failure to watchdog
+                report_task_failure(task_id).await;
+                info!("Sensor task: failed iteration (ENS160), reported failure to watchdog");
             }
             (Ok(_), Err(aht21_err)) => {
-                info!("AHT21 reading failed (continuing): {}", aht21_err);
+                info!("AHT21 reading failed: {}", aht21_err);
+                // Report task failure to watchdog
+                report_task_failure(task_id).await;
+                info!("Sensor task: failed iteration (AHT21), reported failure to watchdog");
             }
         }
 
