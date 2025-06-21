@@ -38,4 +38,6 @@ pub enum Event {
     BatteryCharging,
     /// Battery level event (0-100 percentage)
     BatteryLevel(u8),
+    /// Display mode toggle request
+    ToggleDisplayMode,
 }

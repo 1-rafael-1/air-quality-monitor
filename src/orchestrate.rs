@@ -3,6 +3,7 @@
 use crate::{
     display::{DisplayCommand, send_display_command},
     event::{Event, receive_event},
+    system_state::{SYSTEM_STATE, SensorData},
 };
 
 /// Main coordination task that implements the system's event loop
@@ -24,6 +25,23 @@ async fn process_event(event: Event) {
             etoh,
             air_quality,
         } => {
+            // Create sensor data structure
+            let sensor_data = SensorData {
+                temperature,
+                humidity,
+                co2,
+                etoh,
+                air_quality,
+            };
+
+            // Update system state with new sensor data and CO2 history
+            {
+                let mut state = SYSTEM_STATE.lock().await;
+                state.add_co2_measurement(co2);
+                state.set_last_sensor_data(sensor_data);
+            }
+
+            // Send display command
             send_display_command(DisplayCommand::SensorData {
                 temperature,
                 humidity,
@@ -34,10 +52,39 @@ async fn process_event(event: Event) {
             .await;
         }
         Event::BatteryCharging => {
+            // Update system state
+            {
+                let mut state = SYSTEM_STATE.lock().await;
+                state.set_charging(true);
+            }
+
             send_display_command(DisplayCommand::UpdateBatteryCharging).await;
         }
         Event::BatteryLevel(level) => {
+            // Update system state
+            {
+                let mut state = SYSTEM_STATE.lock().await;
+                state.set_charging(false);
+                state.set_battery_percent(level);
+            }
+
             send_display_command(DisplayCommand::UpdateBatteryPercentage(level)).await;
+        }
+        Event::ToggleDisplayMode => {
+            // Check if we have sensor data and toggle mode if we do
+            let should_toggle_and_data = {
+                let mut state = SYSTEM_STATE.lock().await;
+                if state.last_sensor_data.is_some() {
+                    state.toggle_display_mode();
+                    (true, state.last_sensor_data.clone())
+                } else {
+                    (false, None)
+                }
+            };
+
+            if should_toggle_and_data.0 {
+                send_display_command(DisplayCommand::ToggleMode).await;
+            }
         }
     }
 }

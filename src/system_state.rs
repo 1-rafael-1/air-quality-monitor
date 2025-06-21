@@ -1,7 +1,11 @@
 //! System state management for the Air Quality Monitor
 
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use ens160_aq::data::AirQualityIndex;
 use heapless::Vec;
+
+/// Global system state - initialized with default values
+pub static SYSTEM_STATE: Mutex<CriticalSectionRawMutex, SystemState> = Mutex::new(SystemState::new());
 
 /// Display modes for alternating between raw data and history graphs
 #[derive(Debug, Eq, PartialEq, Copy, Clone)]
@@ -65,12 +69,17 @@ impl SystemState {
     /// Creates a new `SystemState` with default values
     pub const fn new() -> Self {
         Self {
-            battery_percent: 0,
+            battery_percent: 100,
             is_charging: false,
             last_sensor_data: None,
             co2_history: Vec::new(),
             display_mode: DisplayMode::RawData,
         }
+    }
+
+    /// Sets the last sensor data
+    pub const fn set_last_sensor_data(&mut self, data: SensorData) {
+        self.last_sensor_data = Some(data);
     }
 
     /// Sets the battery percentage

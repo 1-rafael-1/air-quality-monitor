@@ -11,7 +11,6 @@ use embassy_rp::{
 use embassy_sync::{
     blocking_mutex::raw::{CriticalSectionRawMutex, NoopRawMutex},
     channel::Channel,
-    mutex::Mutex,
 };
 use embassy_time::{Duration, Timer};
 use embedded_graphics::{
@@ -32,7 +31,8 @@ use ssd1306_async::{I2CDisplayInterface, Ssd1306, prelude::*};
 use tinybmp::Bmp;
 
 use crate::{
-    system_state::{BatteryLevel, DisplayMode, SensorData, SystemState},
+    event::{Event, send_event},
+    system_state::{BatteryLevel, DisplayMode, SYSTEM_STATE, SensorData},
     watchdog::trigger_watchdog_reset,
 };
 
@@ -78,10 +78,7 @@ async fn wait_for_display_command() -> DisplayCommand {
 
 #[embassy_executor::task]
 #[allow(clippy::too_many_lines)]
-pub async fn display_task(
-    i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>,
-    shared_state: &'static Mutex<NoopRawMutex, SystemState>,
-) {
+pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>) {
     // Initialize the display
     let interface = I2CDisplayInterface::new(i2c_device);
     let mut display =
@@ -132,7 +129,7 @@ pub async fn display_task(
     // Show initial startup screen
     settings.draw_initialization_message(&mut display.color_converted());
     {
-        let state = shared_state.lock().await;
+        let state = SYSTEM_STATE.lock().await;
         settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
     }
     if let Err(e) = display.flush().await {
@@ -151,7 +148,7 @@ pub async fn display_task(
                 etoh,
                 air_quality,
             } => {
-                // Store the new sensor data
+                // Create the sensor data structure
                 let sensor_data = SensorData {
                     temperature,
                     humidity,
@@ -160,19 +157,12 @@ pub async fn display_task(
                     air_quality,
                 };
 
-                // Add CO2 measurement to history and handle display logic
-                {
-                    let mut state = shared_state.lock().await;
-                    state.add_co2_measurement(co2);
-                    state.last_sensor_data = Some(sensor_data.clone());
-                }
-
                 // Clear main content area (preserves battery icon)
                 settings.clear_main_area(&mut display.color_converted());
 
                 // Draw based on current display mode
                 {
-                    let state = shared_state.lock().await;
+                    let state = SYSTEM_STATE.lock().await;
                     match state.get_display_mode() {
                         DisplayMode::RawData => {
                             settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
@@ -187,50 +177,33 @@ pub async fn display_task(
                 }
             }
             DisplayCommand::UpdateBatteryCharging => {
-                {
-                    let mut state = shared_state.lock().await;
-                    state.set_charging(true);
-                }
-
                 // Only clear and redraw battery icon area
                 settings.clear_battery_area(&mut display.color_converted());
                 {
-                    let state = shared_state.lock().await;
+                    let state = SYSTEM_STATE.lock().await;
                     settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
                 }
             }
-            DisplayCommand::UpdateBatteryPercentage(bat_percent) => {
-                {
-                    let mut state = shared_state.lock().await;
-                    state.set_charging(false);
-                    state.set_battery_percent(bat_percent);
-                }
-
+            DisplayCommand::UpdateBatteryPercentage(_bat_percent) => {
                 // Only clear and redraw battery icon area
                 settings.clear_battery_area(&mut display.color_converted());
                 {
-                    let state = shared_state.lock().await;
+                    let state = SYSTEM_STATE.lock().await;
                     settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
                 }
             }
             DisplayCommand::ToggleMode => {
-                // Only toggle if we have sensor data
+                // State has already been toggled by orchestrator, just redraw
                 let sensor_data_option = {
-                    let mut state = shared_state.lock().await;
-
-                    if state.last_sensor_data.is_some() {
-                        state.toggle_display_mode();
-                    }
+                    let state = SYSTEM_STATE.lock().await;
                     state.last_sensor_data.clone()
                 };
 
                 settings.clear_main_area(&mut display.color_converted());
                 if let Some(sensor_data) = sensor_data_option {
-                    // Clear main content area (preserves battery icon)
-
-                    // Redraw with the (potentially adjusted) mode
+                    // Redraw with the current mode
                     {
-                        let state = shared_state.lock().await;
+                        let state = SYSTEM_STATE.lock().await;
                         match state.get_display_mode() {
                             DisplayMode::RawData => {
                                 settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
@@ -247,7 +220,7 @@ pub async fn display_task(
 
                 // Draw battery icon (common to both branches)
                 {
-                    let state = shared_state.lock().await;
+                    let state = SYSTEM_STATE.lock().await;
                     settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
                 }
             }
@@ -602,13 +575,13 @@ impl Settings<'_> {
     }
 }
 
-/// Mode switching task that sends ToggleMode commands every 10 seconds
+/// Mode switching task that sends ToggleDisplayMode events every 10 seconds
 #[embassy_executor::task]
 pub async fn mode_switch_task() {
     loop {
         Timer::after(TOGGLE_MODE).await;
 
-        // Send toggle mode command
-        send_display_command(DisplayCommand::ToggleMode).await;
+        // Send toggle mode event to orchestrator
+        send_event(Event::ToggleDisplayMode).await;
     }
 }
