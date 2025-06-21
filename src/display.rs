@@ -21,7 +21,7 @@ use embedded_graphics::{
     },
     pixelcolor::{BinaryColor, Gray8},
     prelude::*,
-    primitives::{PrimitiveStyle, Rectangle},
+    primitives::{Line, PrimitiveStyle, Rectangle},
     text::{Baseline, Text},
 };
 use ens160_aq::data::AirQualityIndex;
@@ -532,18 +532,15 @@ impl Settings<'_> {
             let bar_x = i as i32 * bar_width;
             let bar_y = chart_start_y + chart_height - bar_height; // Draw from bottom up
 
-            // Draw the bar
-            let bar_rect = Rectangle::new(
+            // Draw hatched bar to reduce power consumption
+            self.draw_hatched_bar(
+                display,
                 Point::new(bar_x, bar_y),
                 Size::new(
                     (bar_width - 1).max(0) as u32, // -1 for spacing between bars, ensure non-negative
                     bar_height.max(0) as u32,
                 ),
             );
-            bar_rect
-                .into_styled(PrimitiveStyle::with_fill(BinaryColor::On))
-                .draw(display)
-                .unwrap_or_default();
         }
 
         // Draw min/max labels - using configured positions and smaller font
@@ -568,6 +565,39 @@ impl Settings<'_> {
         )
         .draw(display)
         .unwrap_or_default();
+    }
+
+    /// Draws a hatched bar pattern to reduce power consumption compared to solid fill
+    #[allow(clippy::unused_self, clippy::cast_possible_wrap)]
+    fn draw_hatched_bar<D>(&self, display: &mut D, position: Point, size: Size)
+    where
+        D: DrawTarget<Color = BinaryColor>,
+    {
+        if size.width == 0 || size.height == 0 {
+            return;
+        }
+
+        // Draw the outline of the bar first
+        let bar_rect = Rectangle::new(position, size);
+        bar_rect
+            .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+            .draw(display)
+            .unwrap_or_default();
+
+        // Draw horizontal hatching lines with spacing, draw every 3rd horizontal line
+        let start_x = position.x + 1; // Skip the left border
+        let end_x = position.x + size.width as i32 - 1; // Skip the right border
+        let start_y = position.y;
+        let end_y = position.y + size.height as i32;
+
+        for y in (start_y + 1..end_y - 1).step_by(3) {
+            if end_x > start_x {
+                Line::new(Point::new(start_x, y), Point::new(end_x, y))
+                    .into_styled(PrimitiveStyle::with_stroke(BinaryColor::On, 1))
+                    .draw(display)
+                    .unwrap_or_default();
+            }
+        }
     }
 }
 
