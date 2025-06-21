@@ -31,6 +31,19 @@ A compact, battery-powered air quality monitoring device built with Rust and a W
 | LiPo Battery | 3.7V rechargeable battery. I use 2500mA, 7 x 40 x 60mm with a 1.25mm connector | Portable power source |
 | Slide Switch | Slide switch to control power | Power management |
 
+### Things to know
+
+The ENS160 sensor and AHT21 sensor are on a combined board here, bough very cheap. A EBS160 datasheet and the ENS160 sensor on the board do not always agree on things. The AHT21 may in fact be a AHT20 according to some comments...
+
+Here is what I found not being what I expected:
+
++ ENS160 ADD pin seems to be floating, sensor will not work if not connected to GND
++ Vendor says 1min warmup time, datasheet says 3min warmup time for ENS160. I settle for 1min, and see no difference in readings
++ ENS160 datasheet says InitialStartup happens once in a sensor life for the first hour of operation, after 24h of operation the sensor should permanently store that it is now initialized. In reality InitialStartupPhase is the status for the first hour of operation every time the sensor powers up or even just leaves idle state. So I just live with that status, it does not seem to matter.
++ AHT21 humidity is always reasonably close to external sensor readings, but temperature is always 2 to 3 degrees Celsius above external sensor readings. I just introduced a correction factor in code.
+
+Bottom line: You buy cheap, you get cheap.
+
 ## Hardware Connections
 
 Connect the components to the Waveshare RP2350 board as follows:
@@ -42,31 +55,44 @@ Since ENS160 and AHT21 are on the same module, they share the bus anyway and the
 
 ### ENS160 + AHT21 Module
 
-- **VCC**: 3.3V
-- **GND**: Ground
-- **SDA**: GPIO 16
-- **SCL**: GPIO 17
-- **INT**: GPIO 18 (ENS160 interrupt pin)
++ **VCC**: 3.3V
++ **GND**: Ground
++ **SDA**: GPIO 16
++ **SCL**: GPIO 17
++ **INT**: GPIO 18 (ENS160 interrupt pin)
 
 ### SSD1306 OLED Display
 
-- **VCC**: 3.3V
-- **GND**: Ground
-- **SDA**: GPIO 16
-- **SCL**: GPIO 17
++ **VCC**: 3.3V
++ **GND**: Ground
++ **SDA**: GPIO 16
++ **SCL**: GPIO 17
 
 ### Power Monitoring
 
 Power and charging detection is handled through VSYS voltage monitoring due to RP2350 E9 erratum affecting VBUS detection.
 
-- **VSYS**: GPIO 29 (Battery voltage monitoring via ADC and charging detection)
++ **VSYS**: GPIO 29 (Battery voltage monitoring via ADC and charging detection)
 
 ### Battery
 
-- **Battery**: 3.7V LiPo battery connected to the battery connector on the Waveshare board.
++ **Battery**: 3.7V LiPo battery connected to the battery connector on the Waveshare board.
 
 The Waveshare board has built-in battery charging and power management, so no additional components are required.
 In case you want to use i.e. a Pi Pico 2, you need to add a charger board and appropriate circuit. The Pi Pico 2 datasheet has instructions.
+
+## Power Consumption
+
+On average I measure between 21 and 22mA average current, when supplying 3.7V to the device (which is the nominal voltage for the battery I use).
+
+The baseline for controller and display combined is around 10-11mA, the ens160 sensor draws around 10-11mA when warming up & measuring, the aht21 is negligible. So with these values the device can theoretically run for around 100 hours on a 2500mAh battery, considering the inbuilt charge controller ofthe battery will not let us use more that say 90% of the battery capacity.
+
+Here is a screen capture of the current consumption measured with a Power Profiler Kit II:
+
+<table>
+<tr>
+<td><img src="readme_media/power_profile.png" alt="Power Consumption Measurement" width="500"/></td>
+</table>
 
 ## Assembly and Enclosure
 
@@ -86,10 +112,10 @@ The device features a custom 3D-printed enclosure.
 
 **3D Print Files**: All enclosure files are available in the [`enclosure/`](./enclosure/) directory:
 
-- `Main Body.3mf` - Main housing with sensor openings
-- `Back Lid.3mf` - Battery compartment cover
-- `EnclosureComplete.FCStd` - Body FreeCAD file
-- `Back Lid.FCStd` - Back lid FreeCAD file
++ `Main Body.3mf` - Main housing with sensor openings
++ `Back Lid.3mf` - Battery compartment cover
++ `EnclosureComplete.FCStd` - Body FreeCAD file
++ `Back Lid.FCStd` - Back lid FreeCAD file
 
 <table>
 <tr>
@@ -127,12 +153,12 @@ src/
 
 ### Key Features
 
-- **Async Architecture**: Uses Embassy framework for task scheduling
-- **Power Optimization**: 18MHz clock, voltage scaling, and idle modes
-- **Median Filtering**: Reduces sensor noise through statistical processing
-- **Battery Monitoring**: VSYS-based voltage tracking with adaptive filtering (median filtering on battery, direct measurement when charging)
-- **Charging Detection**: Automatic detection of charging state via voltage thresholds (works around RP2350 E9 erratum)
-- **Mode Switching**: Automatic display cycling between sensor data and CO2 history views
++ **Async Architecture**: Uses Embassy framework for task scheduling
++ **Power Optimization**: 18MHz clock, voltage scaling, and idle modes
++ **Median Filtering**: Reduces sensor noise through statistical processing
++ **Battery Monitoring**: VSYS-based voltage tracking with adaptive filtering (median filtering on battery, direct measurement when charging)
++ **Charging Detection**: Automatic detection of charging state via voltage thresholds (works around RP2350 E9 erratum)
++ **Mode Switching**: Automatic display cycling between sensor data and CO2 history views
 
 ## Building and Flashing
 
@@ -162,7 +188,7 @@ cargo run
 
 This project is licensed under either of:
 
-- [Apache License, Version 2.0](LICENSE-APACHE)
-- [MIT License](LICENSE-MIT)
++ [Apache License, Version 2.0](LICENSE-APACHE)
++ [MIT License](LICENSE-MIT)
 
 at your option.

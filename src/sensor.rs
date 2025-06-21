@@ -26,7 +26,7 @@ use crate::{
 static AHT21_TEMPERATURE_OFFSET: f32 = -3.5;
 
 /// Warmup time for ENS160 sensor in seconds
-const WARMUP_TIME: u64 = 180;
+const WARMUP_TIME: u64 = 60;
 
 /// Idle time for ENS160 sensor in seconds to conserve power
 const IDLE_TIME: u64 = 120;
@@ -221,8 +221,16 @@ async fn ens160_idle(
         .await
         .map_err(|_| "Failed to get ENS160 status before idle mode")?;
 
-    if matches!(status.validity_flag(), ValidityFlag::InitialStartupPhase) {
-        info!("ENS160 is still in Initial Startup Phase - cannot put to idle mode");
+    // Check if the sensor is in a valid state to put to idle mode
+    // The ens160 datasheet assumes InitialStartupPhase will only occur once in a sensors lifetime, after 24h of normal
+    // operation. But the version used in this project does not seem to having read the datasheet correctly :-)
+    // Every idle mode command will reset the sensor to InitialStartupPhase, in which it will happily work as expected.
+    if matches!(status.validity_flag(), ValidityFlag::InitialStartupPhase)
+        || matches!(status.validity_flag(), ValidityFlag::NormalOperation)
+    {
+        info!("ENS160 is in normal operation - putting to idle mode");
+    } else {
+        info!("ENS160 is not in normal operation - cannot put to idle mode");
         return Ok(());
     }
 
