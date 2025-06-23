@@ -8,7 +8,7 @@ use embassy_rp::{
     peripherals::I2C0,
 };
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_time::{Delay, Timer};
+use embassy_time::{Delay, Instant, Timer};
 use ens160_aq::{
     Ens160,
     data::{AirQualityIndex, InterruptPinConfig, OperationMode, ValidityFlag},
@@ -19,23 +19,27 @@ use panic_probe as _;
 
 use crate::{
     event::{Event, send_event},
+    system_state::SYSTEM_STATE,
     watchdog::{TaskId, report_task_failure, report_task_success},
 };
 
 /// Temperature offset for AHT21 sensor in degrees Celsius
 static AHT21_TEMPERATURE_OFFSET: f32 = -3.5;
 
-/// Warmup time for ENS160 sensor in seconds
-const WARMUP_TIME: u64 = 60;
+/// Warmup time for ENS160 sensor in seconds (3 minutes)
+const WARMUP_TIME: u64 = 180;
 
-/// Idle time for ENS160 sensor in seconds to conserve power
-const IDLE_TIME: u64 = 120;
+/// Idle time for ENS160 sensor in seconds to conserve power (3 minutes)
+const IDLE_TIME: u64 = 180;
+
+/// Initial calibration time for ENS160 sensor in seconds (25 hours)
+const INITIAL_CALIBRATION_TIME: u64 = 25 * 60 * 60;
+
+/// Time between readings during initial calibration period (30 seconds)
+const CALIBRATION_READ_INTERVAL: u64 = 30;
 
 /// Number of readings for ENS160 median calculation
 const ENS160_MEDIAN_READINGS: usize = 3;
-
-/// Interval between ENS160 readings for median calculation (in seconds)
-const ENS160_READ_INTERVAL: u64 = 10;
 
 /// Initialize the AHT21 sensor
 async fn initialize_aht21(
@@ -104,7 +108,7 @@ struct Ens160Readings {
 }
 
 /// Read data from AHT21 sensor
-async fn read_aht21_data(
+async fn read_aht21(
     aht21: &mut Aht20<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
 ) -> Result<Aht21Readings, &'static str> {
     let (hum, temp) = aht21.read().await.map_err(|_| "Failed to read AHT21 sensor")?;
@@ -123,13 +127,12 @@ async fn read_aht21_data(
     Ok(readings)
 }
 
-/// Read data from ENS160 sensor with temperature and humidity compensation
-/// Uses moving median of 3 readings taken 10 seconds apart, using interrupt to ensure complete data
-async fn read_ens160_data(
+/// Read data from ENS160 sensor
+/// Uses moving median of 3 readings taken, using interrupt to ensure complete data
+/// Note: Temperature and humidity compensation should be set separately using `set_ens160_compensation`
+async fn read_ens160(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
     int: &mut Input<'static>,
-    temp: f32,
-    rh: f32,
 ) -> Result<Ens160Readings, &'static str> {
     let mut co2_median = MovingMedian::<f32, ENS160_MEDIAN_READINGS>::new();
     let mut etoh_median = MovingMedian::<f32, ENS160_MEDIAN_READINGS>::new();
@@ -144,13 +147,6 @@ async fn read_ens160_data(
 
         let status = ens160.get_status().await.map_err(|_| "Failed to get ENS160 status")?;
         info!("ENS160 status: {}", Debug2Format(&status));
-
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        ens160
-            .set_temp_rh_comp(temp, rh as u16)
-            .await
-            .map_err(|_| "Failed to set temperature and humidity compensation")?;
-        Timer::after_millis(100).await;
 
         let eco2 = ens160.get_eco2().await.map_err(|_| "Failed to get eCO2")?;
         let etoh = ens160.get_etoh().await.map_err(|_| "Failed to get ethanol")?;
@@ -172,13 +168,7 @@ async fn read_ens160_data(
 
         co2_median.add_value(co2_value);
         etoh_median.add_value(etoh_value);
-        let _ = co2_aqi_pairs.push((co2_value, aq)); // Store CO2-AQI pair
-
-        // Wait 10 seconds before next reading (except for the last one)
-        if i < ENS160_MEDIAN_READINGS - 1 {
-            info!("Waiting {} seconds before next ENS160 reading", ENS160_READ_INTERVAL);
-            Timer::after_secs(ENS160_READ_INTERVAL).await;
-        }
+        let _ = co2_aqi_pairs.push((co2_value, aq));
     }
 
     let median_co2 = co2_median.median();
@@ -211,7 +201,7 @@ async fn read_ens160_data(
 }
 
 /// Put ENS160 to idle for power conservation
-async fn ens160_idle(
+async fn idle_ens160(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
 ) -> Result<(), &'static str> {
     info!("Putting ENS160 sensor to idle mode");
@@ -244,7 +234,7 @@ async fn ens160_idle(
 }
 
 /// Set ENS160 to Standard mode and wait for it to be ready.
-async fn ens160_wake(
+async fn wake_ens160(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
     int: &mut Input<'static>,
 ) -> Result<(), &'static str> {
@@ -277,7 +267,81 @@ async fn ens160_wake(
     Ok(())
 }
 
-/// Sensor task for reading data from AHT21 and ENS160 sensors.
+/// Check if ENS160 is calibrated and ready for idle/wake cycles
+/// The ENS160 sensor requires a 24-hour calibration period after initial startup, as per datasheet this is required once per sensor life.
+/// We detect this need by the fact that the sensor is in `InitialStartupPhase`, which should happen only if the sensor has never been continuously powered for 24 hours.
+async fn is_ens160_calibrated(
+    ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
+) -> Result<bool, &'static str> {
+    let calibration_state = {
+        let state = SYSTEM_STATE.lock().await;
+        state.get_ens160_calibration_state()
+    };
+
+    // First check if already marked as calibrated
+    if calibration_state.is_calibrated {
+        return Ok(true);
+    }
+
+    // If we have a calibration start time, check if 25 hours have elapsed
+    if let Some(start_time) = calibration_state.calibration_start_time {
+        let elapsed = Instant::now().as_secs() - start_time;
+        // If 25 hours have passed since calibration started, mark as calibrated
+        if elapsed >= INITIAL_CALIBRATION_TIME {
+            {
+                let mut state = SYSTEM_STATE.lock().await;
+                state.mark_ens160_calibrated();
+            }
+            info!("ENS160 calibration period completed ({} hours)", elapsed / 3600);
+            return Ok(true);
+        }
+        info!(
+            "ENS160 calibration in progress: {}/{} hours",
+            elapsed / 3600,
+            INITIAL_CALIBRATION_TIME / 3600
+        );
+        return Ok(false);
+    }
+
+    // Only now check sensor status
+    let status = ens160.get_status().await.map_err(|_| "Failed to get ENS160 status")?;
+
+    // If sensor reports InitialStartupPhase, we need calibration
+    if matches!(status.validity_flag(), ValidityFlag::InitialStartupPhase) {
+        // Start calibration tracking
+        {
+            let mut state = SYSTEM_STATE.lock().await;
+            state.start_ens160_calibration(Instant::now().as_secs());
+        }
+        info!("ENS160 is in InitialStartupPhase - starting 25-hour calibration period");
+        return Ok(false); // Not ready for idle cycles
+    }
+
+    // Default: assume we need calibration
+    {
+        let mut state = SYSTEM_STATE.lock().await;
+        state.start_ens160_calibration(Instant::now().as_secs());
+    }
+    info!("ENS160 calibration state uncertain - starting calibration period");
+    Ok(false)
+}
+
+/// Set temperature and humidity compensation on ENS160 sensor
+async fn set_ens160_compensation(
+    ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
+    temp: f32,
+    rh: f32,
+) -> Result<(), &'static str> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    ens160
+        .set_temp_rh_comp(temp, rh as u16)
+        .await
+        .map_err(|_| "Failed to set temperature and humidity compensation")?;
+    Timer::after_millis(100).await;
+    Ok(())
+}
+
+// #[allow(clippy::too_many_lines)]
 #[embassy_executor::task]
 pub async fn sensor_task(
     aht21: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>,
@@ -322,31 +386,52 @@ pub async fn sensor_task(
     report_task_success(task_id).await;
 
     loop {
-        // Read AHT21 data after cooling period to get accurate readings
-        let aht21_result = read_aht21_data(&mut aht21).await;
+        let ready_for_idle_cycles = match is_ens160_calibrated(&mut ens160).await {
+            Ok(ready) => ready,
+            Err(e) => {
+                info!("Failed to check calibration status: {}", e);
+                report_task_failure(task_id).await;
+                Timer::after_secs(CALIBRATION_READ_INTERVAL).await;
+                continue;
+            }
+        };
 
-        // Update stored values for ENS160 compensation if AHT21 reading was successful
+        // Idle time before waking ENS160
+        Timer::after_secs(IDLE_TIME).await;
+
+        // Read AHT21 data, the ens160 should be as cool as it gets now so at this point we get the most accurate temperature and humidity
+        let aht21_result = read_aht21(&mut aht21).await;
         if let Ok(ref aht21_readings) = aht21_result {
             prev_temp = aht21_readings.temperature;
             prev_humidity = aht21_readings.humidity;
         }
 
-        // Wake up ENS160 sensor and wait for warmup
-        if let Err(e) = ens160_wake(&mut ens160, &mut ens160_int).await {
-            info!("ENS160 wake failed (continuing): {}", e);
+        // Wake up ENS160 sensor and read data (this heats the sensor up)
+        if let Err(e) = wake_ens160(&mut ens160, &mut ens160_int).await {
+            info!("ENS160 wake failed: {}", e);
             report_task_failure(task_id).await;
+            continue;
         }
 
-        // Read ENS160 data using current AHT21 readings for compensation
-        let ens160_result = read_ens160_data(&mut ens160, &mut ens160_int, prev_temp, prev_humidity).await;
-
-        // Put ENS160 to sleep for power conservation immediately after reading
-        if let Err(e) = ens160_idle(&mut ens160).await {
-            info!("ENS160 sleep failed (continuing): {}", e);
+        // Set temperature and humidity compensation
+        if let Err(e) = set_ens160_compensation(&mut ens160, prev_temp, prev_humidity).await {
+            info!("ENS160 compensation setting failed: {}", e);
             report_task_failure(task_id).await;
+            continue;
         }
 
-        // Combine readings and send event if both sensors read successfully
+        let ens160_result = read_ens160(&mut ens160, &mut ens160_int).await;
+
+        // Send ENS160 to idle mode if it is ready for idle/wake cycles
+        if ready_for_idle_cycles {
+            // Put ENS160 to sleep for power conservation immediately after reading
+            if let Err(e) = idle_ens160(&mut ens160).await {
+                info!("ENS160 sleep failed: {}", e);
+                report_task_failure(task_id).await;
+            }
+        }
+
+        // Process readings
         match (ens160_result, aht21_result) {
             (Ok(ens160_readings), Ok(aht21_readings)) => {
                 send_event(Event::SensorData {
@@ -360,30 +445,21 @@ pub async fn sensor_task(
                 })
                 .await;
 
-                // Report task success to watchdog
                 report_task_success(task_id).await;
-                info!("Sensor task: successful iteration, reported success to watchdog");
+                info!("Sensor task: successful iteration with idle/wake cycle");
             }
             (Err(ens160_err), Err(aht21_err)) => {
                 info!("Both sensors failed - ENS160: {}, AHT21: {}", ens160_err, aht21_err);
-                // Report task failure to watchdog
                 report_task_failure(task_id).await;
-                info!("Sensor task: failed iteration, reported failure to watchdog");
             }
             (Err(ens160_err), Ok(_)) => {
                 info!("ENS160 reading failed: {}", ens160_err);
-                // Report task failure to watchdog
                 report_task_failure(task_id).await;
-                info!("Sensor task: failed iteration (ENS160), reported failure to watchdog");
             }
             (Ok(_), Err(aht21_err)) => {
                 info!("AHT21 reading failed: {}", aht21_err);
-                // Report task failure to watchdog
                 report_task_failure(task_id).await;
-                info!("Sensor task: failed iteration (AHT21), reported failure to watchdog");
             }
         }
-
-        Timer::after_secs(IDLE_TIME).await;
     }
 }

@@ -28,6 +28,17 @@ pub struct SystemState {
     co2_history: Vec<u16, 10>,
     /// Current display mode
     display_mode: DisplayMode,
+    /// ENS160 calibration state
+    ens160_calibration_state: Ens160CalibrationState,
+}
+
+/// Represents the calibration state of the ENS160 sensor
+#[derive(Debug, Clone, Copy)]
+pub struct Ens160CalibrationState {
+    /// Whether the sensor has completed its initial 25-hour calibration
+    pub is_calibrated: bool,
+    /// Start time of continuous operation (in seconds since boot)
+    pub calibration_start_time: Option<u64>,
 }
 
 /// Holds the sensor data to be displayed
@@ -74,6 +85,10 @@ impl SystemState {
             last_sensor_data: None,
             co2_history: Vec::new(),
             display_mode: DisplayMode::RawData,
+            ens160_calibration_state: Ens160CalibrationState {
+                is_calibrated: false,
+                calibration_start_time: None,
+            },
         }
     }
 
@@ -121,18 +136,43 @@ impl SystemState {
     }
 
     /// Returns the current battery level based on the battery percentage and charging state
+    /// Attempts to compensate for the fact that the voltage of the battery does not change linearly but drops way steeper at the end
     pub const fn get_battery_level(&self) -> BatteryLevel {
         if self.is_charging {
             BatteryLevel::Charging
         } else {
             match self.battery_percent {
-                0..=25 => BatteryLevel::Bat000,  // 26% range - compensates for quick drop
-                26..=45 => BatteryLevel::Bat020, // 20% range - medium compensation
-                46..=65 => BatteryLevel::Bat040, // 20% range - some compensation
-                66..=80 => BatteryLevel::Bat060, // 15% range - less time needed
-                81..=90 => BatteryLevel::Bat080, // 10% range - short time
+                0..=24 => BatteryLevel::Bat000,
+                25..=44 => BatteryLevel::Bat020,
+                45..=58 => BatteryLevel::Bat040,
+                59..=72 => BatteryLevel::Bat060,
+                73..=86 => BatteryLevel::Bat080,
                 _ => BatteryLevel::Bat100,
             }
         }
+    }
+
+    /// Gets the ENS160 calibration state
+    pub const fn get_ens160_calibration_state(&self) -> Ens160CalibrationState {
+        self.ens160_calibration_state
+    }
+
+    /// Starts the ENS160 calibration period
+    pub const fn start_ens160_calibration(&mut self, start_time: u64) {
+        self.ens160_calibration_state.calibration_start_time = Some(start_time);
+        self.ens160_calibration_state.is_calibrated = false;
+    }
+
+    /// Marks the ENS160 as fully calibrated
+    pub const fn mark_ens160_calibrated(&mut self) {
+        self.ens160_calibration_state.is_calibrated = true;
+        self.ens160_calibration_state.calibration_start_time = None;
+    }
+
+    /// Resets the ENS160 calibration state (e.g., after sensor reset)
+    #[allow(dead_code)]
+    pub const fn reset_ens160_calibration(&mut self) {
+        self.ens160_calibration_state.is_calibrated = false;
+        self.ens160_calibration_state.calibration_start_time = None;
     }
 }
