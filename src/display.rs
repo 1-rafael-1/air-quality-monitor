@@ -414,7 +414,7 @@ impl Settings<'_> {
         settings_image.draw(&mut display.color_converted()).unwrap_or_default();
 
         Text::with_baseline(
-            "Initializing sensors",
+            "Warming up sensors",
             self.sensor_init_position,
             self.sensor_init_text_style,
             Baseline::Top,
