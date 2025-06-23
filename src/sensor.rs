@@ -24,7 +24,7 @@ use crate::{
 };
 
 /// Temperature offset for AHT21 sensor in degrees Celsius
-static AHT21_TEMPERATURE_OFFSET: f32 = -1.3;
+static AHT21_TEMPERATURE_OFFSET: f32 = -2.3;
 
 /// Warmup time for ENS160 sensor in seconds
 const WARMUP_TIME: u64 = 180;
@@ -396,9 +396,6 @@ pub async fn sensor_task(
             }
         };
 
-        // Idle time before waking ENS160
-        Timer::after_secs(IDLE_TIME).await;
-
         // Read AHT21 data, the ens160 should be as cool as it gets now so at this point we get the most accurate temperature and humidity
         let aht21_result = read_aht21(&mut aht21).await;
         if let Ok(ref aht21_readings) = aht21_result {
@@ -461,5 +458,8 @@ pub async fn sensor_task(
                 report_task_failure(task_id).await;
             }
         }
+
+        // Idle time before we continue the loop
+        Timer::after_secs(IDLE_TIME).await;
     }
 }
