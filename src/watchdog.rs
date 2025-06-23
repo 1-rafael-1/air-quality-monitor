@@ -67,11 +67,6 @@ impl SystemHealth {
 
         // Update overall health status
         self.update_overall_health();
-
-        info!(
-            "Task {:?} reported success - all healthy: {}",
-            task_id, self.all_healthy
-        );
     }
 
     /// report a task as failed

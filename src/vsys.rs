@@ -28,12 +28,16 @@ const MEDIAN_WINDOW_SIZE: usize = 5;
 #[embassy_executor::task]
 pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<'static, PIN_29>) {
     let mut voltage_median = MovingMedian::<f32, MEDIAN_WINDOW_SIZE>::new();
+
+    // Track previous states to only send events on changes
+    let mut prev_charging_state: Option<bool> = None;
+    let mut prev_battery_percentage: Option<u8> = None;
+
     info!("VSYS voltage task initialized successfully");
 
     loop {
         // Wait for periodic measurement trigger
         Timer::after(INTERVAL).await;
-        info!("VSYS periodic measurement triggered");
 
         let adc_peri = p_adc.reborrow();
         let pin_peri = p_pin29.reborrow();
@@ -46,8 +50,6 @@ pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<
 
             match read_voltage(&mut adc, &mut channel).await {
                 Ok(voltage) => {
-                    info!("VSYS voltage measurement: {}V", voltage);
-
                     // Determine charging state based on VSYS voltage
                     let is_charging = voltage > CHARGING_VOLTAGE_THRESHOLD;
 
@@ -62,18 +64,37 @@ pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<
 
                     let battery_percentage = voltage_to_percentage(final_voltage);
 
-                    info!("VSYS final voltage: {}V, charging: {}", final_voltage, is_charging);
+                    // Send events only when states change
+                    let charging_state_changed = prev_charging_state != Some(is_charging);
+                    let battery_level_changed = !is_charging && prev_battery_percentage != Some(battery_percentage);
 
-                    // Send battery level and charging state events
-                    if is_charging {
-                        send_event(Event::BatteryCharging).await;
-                    } else {
+                    // Handle charging state changes
+                    if charging_state_changed {
+                        if is_charging {
+                            send_event(Event::BatteryCharging).await;
+                            info!("State change: Now charging ({}V)", final_voltage);
+                        } else {
+                            send_event(Event::BatteryLevel(battery_percentage)).await;
+                            info!(
+                                "State change: Now on battery ({}V, {}%)",
+                                final_voltage, battery_percentage
+                            );
+                        }
+                        prev_charging_state = Some(is_charging);
+                    }
+                    // Handle battery level changes (only when not charging and no charging state change)
+                    else if battery_level_changed {
                         send_event(Event::BatteryLevel(battery_percentage)).await;
+                        info!("Battery level change: {}% ({}V)", battery_percentage, final_voltage);
+                    }
+
+                    // Update previous battery percentage when on battery
+                    if !is_charging {
+                        prev_battery_percentage = Some(battery_percentage);
                     }
 
                     // Report task success for watchdog health monitoring
                     report_task_success(TaskId::Vsys).await;
-                    info!("VSYS task: successful iteration, reporting health");
                 }
                 Err(e) => {
                     error!("Could not read voltage: {}", e);
@@ -90,7 +111,6 @@ pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<
 async fn read_voltage(adc: &mut Adc<'_, Async>, channel: &mut Channel<'_>) -> Result<f32, Error> {
     match with_timeout(Duration::from_millis(200), adc.read(channel)).await {
         Ok(Ok(adc_value)) => {
-            info!("ADC value: {}", adc_value);
             if adc_value == 0 {
                 error!("ADC value is zero, indicating a possible read error");
                 return Err(Error::ConversionFailed);
