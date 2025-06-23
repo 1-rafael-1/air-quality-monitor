@@ -24,9 +24,9 @@ use crate::{
 };
 
 /// Temperature offset for AHT21 sensor in degrees Celsius
-static AHT21_TEMPERATURE_OFFSET: f32 = -3.5;
+static AHT21_TEMPERATURE_OFFSET: f32 = -1.3;
 
-/// Warmup time for ENS160 sensor in seconds (3 minutes)
+/// Warmup time for ENS160 sensor in seconds
 const WARMUP_TIME: u64 = 180;
 
 /// Idle time for ENS160 sensor in seconds to conserve power (3 minutes)
