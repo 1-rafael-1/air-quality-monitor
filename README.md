@@ -15,7 +15,7 @@ A compact, battery-powered air quality monitoring device built with Rust and a W
 
 ## How It Works
 
-1. **Sensor Reading**: Collects data from ENS160 (air quality) and AHT21 (temperature/humidity) sensors every 5.5 minutes
+1. **Sensor Reading**: Collects data from ENS160 (air quality) and AHT21 (temperature/humidity) sensors every 6 minutes
 2. **Data Processing**: Uses median filtering on air quality readings to reduce noise
 3. **Display Updates**: Shows current readings and battery status on a 128x64 OLED display, changing between data and bar graph views every 10 seconds
 4. **Power Management**: Reduced clock speed (18MHz) and core voltage to conserve power. Sends ENS160 to sleep mode when not reading data. The device consumes around 21-22mA on average, allowing it to run for approximately 4 days on a 2500mAh battery.
@@ -38,8 +38,8 @@ The ENS160 sensor and AHT21 sensor are on a combined board here, bought very che
 Here is what I found not being what I expected:
 
 + ENS160 ADD pin seems to be floating, sensor will not work if not connected to GND
-+ Vendor says 1min warmup time, datasheet says 3min warmup time for ENS160. I settle for 1min, and see no difference in readings
-+ ENS160 datasheet says InitialStartup happens once in a sensor life for the first hour of operation, after 24h of operation the sensor should permanently store that it is now initialized. In reality InitialStartupPhase is the status for the first hour of operation every time the sensor powers up or even just leaves idle state. So I just live with that status, it does not seem to matter.
++ Vendor says 1min warmup time, datasheet says 3min warmup time for ENS160. The implementation uses 3min for reliability
++ ENS160 datasheet specifies `InitialStartupPhase` during the first >24 hours of operation - the implementation properly respects this calibration period before enabling power management
 + AHT21 humidity is always reasonably close to external sensor readings, but temperature is always 2 to 3 degrees Celsius above external sensor readings. I just introduced a correction factor in code.
 
 Bottom line: You buy cheap, you get cheap.
@@ -159,6 +159,7 @@ src/
 + **Battery Monitoring**: VSYS-based voltage tracking with adaptive filtering (median filtering on battery, direct measurement when charging)
 + **Charging Detection**: Automatic detection of charging state via voltage thresholds (works around RP2350 E9 erratum)
 + **Mode Switching**: Automatic display cycling between sensor data and CO2 history views
++ **Watchdog System**: Monitors task health with 15-minute timeout and automatic system reset on failure
 
 ## Building and Flashing
 

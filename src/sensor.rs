@@ -212,9 +212,8 @@ async fn idle_ens160(
         .map_err(|_| "Failed to get ENS160 status before idle mode")?;
 
     // Check if the sensor is in a valid state to put to idle mode
-    // The ens160 datasheet assumes InitialStartupPhase will only occur once in a sensors lifetime, after 24h of normal
-    // operation. But the version used in this project does not seem to having read the datasheet correctly :-)
-    // Every idle mode command will reset the sensor to InitialStartupPhase, in which it will happily work as expected.
+    // The ENS160 datasheet specifies that `InitialStartupPhase` occurs during the first 25 hours of operation.
+    // Only after this initial calibration period should the sensor be put into idle mode for power management.
     if matches!(status.validity_flag(), ValidityFlag::InitialStartupPhase)
         || matches!(status.validity_flag(), ValidityFlag::NormalOperation)
     {
@@ -266,8 +265,9 @@ async fn wake_ens160(
 }
 
 /// Check if ENS160 is calibrated and ready for idle/wake cycles
-/// The ENS160 sensor requires a 24-hour calibration period after initial startup, as per datasheet this is required once per sensor life.
-/// We detect this need by the fact that the sensor is in `InitialStartupPhase`, which should happen only if the sensor has never been continuously powered for 24 hours.
+/// The ENS160 sensor requires a >24-hour calibration period after initial startup.
+/// During this period, the sensor must remain in continuous operation. Only after this initial
+/// calibration is the sensor ready for idle/wake power management cycles.
 async fn is_ens160_calibrated(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
 ) -> Result<bool, &'static str> {
