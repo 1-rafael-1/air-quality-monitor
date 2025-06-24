@@ -445,7 +445,7 @@ async fn handle_sensor_iteration(
             })
             .await;
 
-            info!("Sensor task: successful iteration with idle/wake cycle");
+            info!("Sensor task: successful");
             true // Indicate success
         }
         (Err(ens160_err), Err(aht21_err)) => {

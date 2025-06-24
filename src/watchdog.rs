@@ -5,11 +5,11 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Instant, Timer};
 
 /// How long our custom countdown timer runs before triggering a reset (15 minutes)
-const COUNTDOWN_TIMEOUT: Duration = Duration::from_secs(900); // 15 minutes
+const COUNTDOWN_TIMEOUT: Duration = Duration::from_secs(900);
 /// How often we check task health and update our countdown
-const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(60); // 1 minute
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(180);
 /// Hardware watchdog timeout (short, used only for actual reset)
-const HARDWARE_WATCHDOG_TIMEOUT: Duration = Duration::from_millis(8000); // 8 seconds
+const HARDWARE_WATCHDOG_TIMEOUT: Duration = Duration::from_millis(8000);
 
 /// Task identifiers for health tracking
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Format)]
