@@ -28,17 +28,6 @@ pub struct SystemState {
     co2_history: Vec<u16, 10>,
     /// Current display mode
     display_mode: DisplayMode,
-    /// ENS160 calibration state
-    ens160_calibration_state: Ens160CalibrationState,
-}
-
-/// Represents the calibration state of the ENS160 sensor
-#[derive(Debug, Clone, Copy)]
-pub struct Ens160CalibrationState {
-    /// Whether the sensor has completed its initial 25-hour calibration
-    pub is_calibrated: bool,
-    /// Start time of continuous operation (in seconds since boot)
-    pub calibration_start_time: Option<u64>,
 }
 
 /// Holds the sensor data to be displayed
@@ -85,10 +74,6 @@ impl SystemState {
             last_sensor_data: None,
             co2_history: Vec::new(),
             display_mode: DisplayMode::RawData,
-            ens160_calibration_state: Ens160CalibrationState {
-                is_calibrated: false,
-                calibration_start_time: None,
-            },
         }
     }
 
@@ -150,29 +135,5 @@ impl SystemState {
                 _ => BatteryLevel::Bat100,
             }
         }
-    }
-
-    /// Gets the ENS160 calibration state
-    pub const fn get_ens160_calibration_state(&self) -> Ens160CalibrationState {
-        self.ens160_calibration_state
-    }
-
-    /// Starts the ENS160 calibration period
-    pub const fn start_ens160_calibration(&mut self, start_time: u64) {
-        self.ens160_calibration_state.calibration_start_time = Some(start_time);
-        self.ens160_calibration_state.is_calibrated = false;
-    }
-
-    /// Marks the ENS160 as fully calibrated
-    pub const fn mark_ens160_calibrated(&mut self) {
-        self.ens160_calibration_state.is_calibrated = true;
-        self.ens160_calibration_state.calibration_start_time = None;
-    }
-
-    /// Resets the ENS160 calibration state (e.g., after sensor reset)
-    #[allow(dead_code)]
-    pub const fn reset_ens160_calibration(&mut self) {
-        self.ens160_calibration_state.is_calibrated = false;
-        self.ens160_calibration_state.calibration_start_time = None;
     }
 }
