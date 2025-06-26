@@ -5,9 +5,9 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Duration, Instant, Timer};
 
 /// How long our custom countdown timer runs before triggering a reset (15 minutes)
-const COUNTDOWN_TIMEOUT: Duration = Duration::from_secs(900);
+const COUNTDOWN_TIMEOUT: Duration = Duration::from_secs(520);
 /// How often we check task health and update our countdown
-const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(180);
+const HEALTH_CHECK_INTERVAL: Duration = Duration::from_secs(60);
 /// Hardware watchdog timeout (short, used only for actual reset)
 const HARDWARE_WATCHDOG_TIMEOUT: Duration = Duration::from_millis(8000);
 
@@ -61,26 +61,15 @@ impl SystemHealth {
     }
 
     /// report a task as succeeded
-    fn set_task_succeeded(&mut self, task_id: TaskId) {
+    const fn set_task_succeeded(&mut self, task_id: TaskId) {
         let index = task_id as usize;
         self.tasks[index].is_healthy = true;
-
-        // Update overall health status
-        self.update_overall_health();
     }
 
     /// report a task as failed
-    fn set_task_failed(&mut self, task_id: TaskId) {
+    const fn set_task_failed(&mut self, task_id: TaskId) {
         let index = task_id as usize;
         self.tasks[index].is_healthy = false;
-
-        // Update overall health status
-        self.update_overall_health();
-
-        info!(
-            "Task {:?} reported failure - all healthy: {}",
-            task_id, self.all_healthy
-        );
     }
 
     /// Update overall health status based on individual task health
@@ -117,18 +106,6 @@ impl SystemHealth {
         self.countdown_deadline
             .is_some_and(|deadline| Instant::now() >= deadline)
     }
-
-    /// Get remaining time until reset
-    fn get_remaining_time(&self) -> Option<Duration> {
-        self.countdown_deadline.map(|deadline| {
-            let now = Instant::now();
-            if deadline > now {
-                deadline - now
-            } else {
-                Duration::from_secs(0)
-            }
-        })
-    }
 }
 
 /// Global system health tracker
@@ -156,20 +133,21 @@ pub async fn watchdog_task(wd: Peri<'static, WATCHDOG>) {
 
     loop {
         // Check system health and update countdown
-        let (should_reset, remaining_time) = {
+        let (all_healthy, should_reset) = {
             let mut health = SYSTEM_HEALTH.lock().await;
             health.update_overall_health();
 
             // Reset countdown if all tasks are healthy
             if health.all_healthy {
                 health.reset_countdown();
+                info!("All tasks healthy");
             }
 
-            (health.should_trigger_reset(), health.get_remaining_time())
+            (health.all_healthy, health.should_trigger_reset())
         };
 
-        if should_reset {
-            info!("Countdown expired - initializing hardware watchdog for system reset");
+        if !all_healthy && should_reset {
+            info!("Countdown expired - system will reset due to unhealthy tasks");
 
             // Initialize hardware watchdog and don't feed it - this will cause reset
             let mut watchdog = Watchdog::new(wd);
@@ -184,13 +162,6 @@ pub async fn watchdog_task(wd: Peri<'static, WATCHDOG>) {
             // Wait for hardware watchdog to reset the system
             loop {
                 Timer::after_secs(1).await;
-            }
-        } else {
-            // Log status
-            if let Some(time_left) = remaining_time {
-                info!("System healthy - {}s remaining until reset", time_left.as_secs());
-            } else {
-                info!("System starting up - countdown will begin when tasks report status");
             }
         }
 
