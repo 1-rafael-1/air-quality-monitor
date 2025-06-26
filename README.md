@@ -15,10 +15,10 @@ A compact, battery-powered air quality monitoring device built with Rust and a W
 
 ## How It Works
 
-1. **Sensor Reading**: Collects data from ENS160 (air quality) and AHT21 (temperature/humidity) sensors every 6 minutes
+1. **Sensor Reading**: Collects data from ENS160 (air quality) and AHT21 (temperature/humidity) sensors every 5 minutes
 2. **Data Processing**: Uses median filtering on air quality readings to reduce noise
 3. **Display Updates**: Shows current readings and battery status on a 128x64 OLED display, changing between data and bar graph views every 10 seconds
-4. **Power Management**: Reduced clock speed (18MHz) and core voltage to conserve power. Sends ENS160 to sleep mode when not reading data. The device consumes around 21-22mA on average, allowing it to run for approximately 4 days on a 2500mAh battery.
+4. **Power Management**: Reduced clock speed (18MHz) and core voltage to conserve power.
 5. **Battery Monitoring**: VSYS voltage is measured every 4 seconds to determine battery level and charging state. Uses moving median filtering (5 samples) when on battery power for stable readings, and direct measurements when charging to reduce latency.
 
 ## Components
@@ -38,9 +38,9 @@ The ENS160 sensor and AHT21 sensor are on a combined board here, bought very che
 Here is what I found not being what I expected:
 
 + ENS160 ADD pin seems to be floating, sensor will not work if not connected to GND
-+ Vendor says 1min warmup time, datasheet says 3min warmup time for ENS160. The implementation uses 3min for reliability
-+ ENS160 datasheet specifies `InitialStartupPhase` during the first >24 hours of operation - the implementation properly respects this calibration period before enabling power management
-+ AHT21 humidity is always reasonably close to external sensor readings, but temperature is always 2 to 3 degrees Celsius above external sensor readings. I just introduced a correction factor in code.
++ Vendor says 1min warmup time, datasheet says 3min warmup time for ENS160.
++ ENS160 datasheet specifies `InitialStartupPhase` during the first 1 hour of operation and after 24h the sensor should save that it will never need this again. I find this not to be the case, that way all ideas of elaborate power management and sleep/wake cycles are out of the window. The sensor needs to be continuously powered to provide reliable readings.
++ AHT21 humidity is always reasonably close to external sensor readings, but temperature is always 2 to 3 degrees Celsius above external sensor readings. I just introduced a correction factor in code. I suppose this is due to the sensor being on the same board as the ENS160, which generates heat during operation.
 
 Bottom line: You buy cheap, you get cheap.
 
@@ -70,9 +70,9 @@ Since ENS160 and AHT21 are on the same module, they share the bus anyway and the
 
 ### Power Monitoring
 
-Power and charging detection is handled through VSYS voltage monitoring due to RP2350 E9 erratum affecting VBUS detection.
+The Waveshare board has a battery connector, that is wired to vsys, so not need for connections beside plugging in the battery.
 
-+ **VSYS**: GPIO 29 (Battery voltage monitoring via ADC and charging detection)
+Power and charging detection is handled through VSYS voltage monitoring due to RP2350 E9 erratum affecting VBUS detection.
 
 ### Battery
 
@@ -83,16 +83,11 @@ In case you want to use i.e. a Pi Pico 2, you need to add a charger board and ap
 
 ## Power Consumption
 
-On average I measure between 21 and 22mA average current, when supplying 3.7V to the device (which is the nominal voltage for the battery I use).
+On average I measure around 39mA current consumption when supplying 3.7V to the device (which is the nominal voltage for the battery I use).
 
-The baseline for controller and display combined is around 10-11mA, the ENS160 sensor draws around 10-11mA when warming up & measuring, the AHT21 is negligible. So with these values the device can theoretically run for around 100 hours on a 2500mAh battery, considering the built-in charge controller of the battery will not let us use more than say 90% of the battery capacity.
+The baseline for controller and display combined is around 10-11mA, the ENS160 sensor draws around 28mA when operating continuously in Standard mode, the AHT21 is negligible. With these values the device can theoretically run for around 65 hours on a 2500mAh battery, considering the built-in charge controller of the battery will not let us use more than say 90% of the battery capacity.
 
-Here is a screen capture of the current consumption measured with a Power Profiler Kit II:
-
-<table>
-<tr>
-<td><img src="readme_media/power_profile.png" alt="Power Consumption Measurement" width="500"/></td>
-</table>
+Sleep/wake cycling was initially attempted to reduce power consumption, but proved unreliable (see above).
 
 ## Assembly and Enclosure
 
