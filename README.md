@@ -129,6 +129,16 @@ After printing the enclosure parts, assemble the electronics into the housing. T
 </tr>
 </table>
 
+Use brass hot melt inserts for the enclosure screws to secure the back lid. Same goes for the slide switch, which is mounted on the front side of the enclosure.
+
+The whole electronics can be fitted inside without any glue, only the OLED display needs held in place by tape (because i forgot to design a holder for it).
+
+<table>
+<tr>
+<td><img src="readme_media/assembly_electronics_in_enclosure.png" alt="Enclosure Assembly Process 2" width="400"/></td>
+</tr>
+</table>
+
 ## Code Structure
 
 The firmware is built using Embassy (async Rust) and organized into modular tasks:
