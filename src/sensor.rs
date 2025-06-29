@@ -23,7 +23,7 @@ use crate::{
 };
 
 /// Temperature offset for AHT21 sensor in degrees Celsius
-static AHT21_TEMPERATURE_OFFSET: f32 = -2.3;
+static AHT21_TEMPERATURE_OFFSET: f32 = -3.5;
 
 /// Warmup time for ENS160 sensor in seconds
 const WARMUP_TIME: u64 = 180;
