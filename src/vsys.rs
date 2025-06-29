@@ -25,6 +25,11 @@ const CHARGING_VOLTAGE_THRESHOLD: f32 = 4.4;
 /// Median window size for voltage measurements when on battery power
 const MEDIAN_WINDOW_SIZE: usize = 5;
 
+/// Vsys voltage offset - calibrated by measuring actual voltage supplied as opposed to what we can measure on the VSYS pin
+/// For whatever reason the waveshare boards have a considerably lower voltage on the VSYS pin than what is actually supplied,
+/// this is true for powering from USB or battery both.
+const VSYS_VOLTAGE_OFFSET: f32 = 0.27;
+
 #[embassy_executor::task]
 pub async fn vsys_voltage_task(mut p_adc: Peri<'static, ADC>, mut p_pin29: Peri<'static, PIN_29>) {
     let mut voltage_median = MovingMedian::<f32, MEDIAN_WINDOW_SIZE>::new();
@@ -134,13 +139,13 @@ fn adc_value_to_voltage(adc_value: u16) -> f32 {
     const ADC_REF_VOLTAGE: f32 = 3.3;
     const VOLTAGE_DIVIDER: f32 = 3.0;
     const ADC_MAX_VALUE: f32 = 4096.0; // 12-bit ADC
-    f32::from(adc_value) * VOLTAGE_DIVIDER * (ADC_REF_VOLTAGE / ADC_MAX_VALUE)
+    f32::from(adc_value) * VOLTAGE_DIVIDER * (ADC_REF_VOLTAGE / ADC_MAX_VALUE) + VSYS_VOLTAGE_OFFSET
 }
 
 /// Converts voltage to battery percentage
 fn voltage_to_percentage(voltage: f32) -> u8 {
     const MIN_VOLTAGE: f32 = 3.0; // 0% battery
-    const MAX_VOLTAGE: f32 = 4.2; // 100% battery
+    const MAX_VOLTAGE: f32 = 4.1; // 100% battery
 
     let percentage = if voltage >= MAX_VOLTAGE {
         100.0
