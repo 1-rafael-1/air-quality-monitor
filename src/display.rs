@@ -84,7 +84,7 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
     let mut display =
         Ssd1306::new(interface, DisplaySize128x64, DisplayRotation::Rotate0).into_buffered_graphics_mode();
 
-    // Critical initialization - if this fails, we need to reset
+    // Perform critical hardware initialization
     if let Err(e) = display.init().await {
         error!("Failed to initialize display: {}", Debug2Format(&e));
         return;
@@ -103,22 +103,12 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
     }
 
     // Create settings for the display
-    let settings = match Settings::new() {
-        Ok(settings) => settings,
-        Err(e) => {
-            error!("Failed to load display assets: {}", e);
-            return;
-        }
+    let Some(settings) = initialize_display_settings() else {
+        return;
     };
 
-    info!("Display task initialized successfully");
-
     // Show initial startup screen
-    settings.draw_initialization_message(&mut display.color_converted());
-    {
-        let state = SYSTEM_STATE.lock().await;
-        settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
-    }
+    show_initial_screen(&mut display, &settings).await;
     if let Err(e) = display.flush().await {
         error!("Failed to flush initial screen: {}", Debug2Format(&e));
         return;
@@ -131,91 +121,8 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
     loop {
         let command = wait_for_display_command().await;
 
-        match command {
-            DisplayCommand::SensorData {
-                temperature,
-                humidity,
-                co2,
-                etoh,
-                air_quality,
-            } => {
-                // Create the sensor data structure
-                let sensor_data = SensorData {
-                    temperature,
-                    humidity,
-                    co2,
-                    etoh,
-                    air_quality,
-                };
-
-                // Clear main content area (preserves battery icon)
-                settings.clear_main_area(&mut display.color_converted());
-
-                // Draw based on current display mode
-                {
-                    let state = SYSTEM_STATE.lock().await;
-                    match state.get_display_mode() {
-                        DisplayMode::RawData => {
-                            settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
-                        }
-                        DisplayMode::Co2History => {
-                            settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
-                        }
-                    }
-
-                    // Draw battery icon
-                    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
-                }
-            }
-            DisplayCommand::UpdateBatteryCharging => {
-                // Only clear and redraw battery icon area
-                settings.clear_battery_area(&mut display.color_converted());
-                {
-                    let state = SYSTEM_STATE.lock().await;
-                    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
-                }
-            }
-            DisplayCommand::UpdateBatteryPercentage(_bat_percent) => {
-                // Only clear and redraw battery icon area
-                settings.clear_battery_area(&mut display.color_converted());
-                {
-                    let state = SYSTEM_STATE.lock().await;
-                    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
-                }
-            }
-            DisplayCommand::ToggleMode => {
-                // State has already been toggled by orchestrator, just redraw
-                let sensor_data_option = {
-                    let state = SYSTEM_STATE.lock().await;
-                    state.last_sensor_data.clone()
-                };
-
-                settings.clear_main_area(&mut display.color_converted());
-                if let Some(sensor_data) = sensor_data_option {
-                    // Redraw with the current mode
-                    {
-                        let state = SYSTEM_STATE.lock().await;
-                        match state.get_display_mode() {
-                            DisplayMode::RawData => {
-                                settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
-                            }
-                            DisplayMode::Co2History => {
-                                settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
-                            }
-                        }
-                    }
-                } else {
-                    // No sensor data yet, clear main area and show initialization message
-                    settings.draw_initialization_message(&mut display.color_converted());
-                }
-
-                // Draw battery icon
-                {
-                    let state = SYSTEM_STATE.lock().await;
-                    settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
-                }
-            }
-        }
+        // Handle the display command
+        handle_display_command(command, &mut display, &settings).await;
 
         // Flush display - if this fails, it's transient, so we continue
         if let Err(e) = display.flush().await {
@@ -226,6 +133,119 @@ pub async fn display_task(i2c_device: I2cDevice<'static, NoopRawMutex, I2c<'stat
             // Report task success for watchdog health monitoring (flush succeeded)
             report_task_success(task_id).await;
         }
+    }
+}
+
+/// Handles a display command and updates the display accordingly
+async fn handle_display_command<D>(command: DisplayCommand, display: &mut D, settings: &Settings<'_>)
+where
+    D: embedded_graphics::prelude::DrawTarget<Color = BinaryColor>,
+{
+    match command {
+        DisplayCommand::SensorData {
+            temperature,
+            humidity,
+            co2,
+            etoh,
+            air_quality,
+        } => {
+            // Create the sensor data structure
+            let sensor_data = SensorData {
+                temperature,
+                humidity,
+                co2,
+                etoh,
+                air_quality,
+            };
+
+            // Clear main content area (preserves battery icon)
+            settings.clear_main_area(&mut display.color_converted());
+
+            // Draw based on current display mode
+            {
+                let state = SYSTEM_STATE.lock().await;
+                match state.get_display_mode() {
+                    DisplayMode::RawData => {
+                        settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
+                    }
+                    DisplayMode::Co2History => {
+                        settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
+                    }
+                }
+
+                // Draw battery icon
+                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+            }
+        }
+        DisplayCommand::UpdateBatteryCharging | DisplayCommand::UpdateBatteryPercentage(_) => {
+            // Only clear and redraw battery icon area
+            settings.clear_battery_area(&mut display.color_converted());
+            {
+                let state = SYSTEM_STATE.lock().await;
+                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+            }
+        }
+        DisplayCommand::ToggleMode => {
+            // State has already been toggled by orchestrator, just redraw
+            let sensor_data_option = {
+                let state = SYSTEM_STATE.lock().await;
+                state.last_sensor_data.clone()
+            };
+
+            settings.clear_main_area(&mut display.color_converted());
+            if let Some(sensor_data) = sensor_data_option {
+                // Redraw with the current mode
+                {
+                    let state = SYSTEM_STATE.lock().await;
+                    match state.get_display_mode() {
+                        DisplayMode::RawData => {
+                            settings.draw_sensor_data(&mut display.color_converted(), &sensor_data);
+                        }
+                        DisplayMode::Co2History => {
+                            settings.draw_co2_history(&mut display.color_converted(), state.get_co2_history());
+                        }
+                    }
+                }
+            } else {
+                // No sensor data yet, clear main area and show initialization message
+                settings.draw_initialization_message(&mut display.color_converted());
+            }
+
+            // Draw battery icon
+            {
+                let state = SYSTEM_STATE.lock().await;
+                settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
+            }
+        }
+    }
+}
+
+/// Initializes the display settings
+/// Returns the settings if successful, or None if initialization failed
+fn initialize_display_settings() -> Option<Settings<'static>> {
+    // Create settings for the display
+    match Settings::new() {
+        Ok(settings) => {
+            info!("Display task initialized successfully");
+            Some(settings)
+        }
+        Err(e) => {
+            error!("Failed to load display assets: {}", e);
+            None
+        }
+    }
+}
+
+/// Shows the initial startup screen on the display
+async fn show_initial_screen<D>(display: &mut D, settings: &Settings<'_>)
+where
+    D: embedded_graphics::prelude::DrawTarget<Color = BinaryColor>,
+{
+    // Show initial startup screen
+    settings.draw_initialization_message(&mut display.color_converted());
+    {
+        let state = SYSTEM_STATE.lock().await;
+        settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
     }
 }
 
