@@ -67,8 +67,10 @@ async fn initialize_ens160(
 
 /// Struct to hold AHT21 sensor readings
 struct Aht21Readings {
-    /// Temperature in degrees Celsius
-    temperature: f32,
+    /// Raw temperature in degrees Celsius (for ENS160 compensation)
+    raw_temperature: f32,
+    /// Display temperature in degrees Celsius (with offset applied)
+    display_temperature: f32,
     /// Humidity in percentage
     humidity: f32,
 }
@@ -88,16 +90,18 @@ async fn read_aht21(
     aht21: &mut Aht20<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
 ) -> Result<Aht21Readings, &'static str> {
     let (hum, temp) = aht21.read().await.map_err(|_| "Failed to read AHT21 sensor")?;
-    let (temp, rh) = (temp.celsius() + AHT21_TEMPERATURE_OFFSET, hum.rh());
+    let raw_temp = temp.celsius();
+    let rh = hum.rh();
 
     let readings = Aht21Readings {
-        temperature: temp,
+        raw_temperature: raw_temp,
+        display_temperature: raw_temp + AHT21_TEMPERATURE_OFFSET,
         humidity: rh,
     };
 
     info!(
-        "Temperature: {}°C, Humidity: {}%",
-        readings.temperature, readings.humidity
+        "Temperature: {}°C (raw: {}°C), Humidity: {}%",
+        readings.display_temperature, readings.raw_temperature, readings.humidity
     );
 
     Ok(readings)
@@ -182,6 +186,7 @@ async fn read_ens160(
 // consistent and accurate air quality measurements.
 
 /// Set temperature and humidity compensation on ENS160 sensor
+/// Uses raw temperature (without offset correction) for accurate sensor compensation
 async fn set_ens160_compensation(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
     temp: f32,
@@ -255,7 +260,7 @@ async fn handle_sensor_iteration(
     // Read AHT21 data first to get current environmental conditions
     let aht21_result = read_aht21(aht21).await;
     if let Ok(ref aht21_readings) = aht21_result {
-        *prev_temp = aht21_readings.temperature;
+        *prev_temp = aht21_readings.raw_temperature; // Use raw temperature for ENS160 compensation
         *prev_humidity = aht21_readings.humidity;
     }
 
@@ -271,7 +276,7 @@ async fn handle_sensor_iteration(
     match (ens160_result, aht21_result) {
         (Ok(ens160_readings), Ok(aht21_readings)) => {
             send_event(Event::SensorData {
-                temperature: aht21_readings.temperature,
+                temperature: aht21_readings.display_temperature, // Use display temperature for UI
                 humidity: aht21_readings.humidity,
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 co2: ens160_readings.co2 as u16,
@@ -318,7 +323,7 @@ pub async fn sensor_task(
     };
 
     // Store previous AHT21 readings for ENS160 compensation
-    let mut prev_temp = 25.0; // Default temperature
+    let mut prev_temp = 25.0; // Default raw temperature (without offset)
     let mut prev_humidity = 50.0; // Default humidity
 
     info!("Sensor task initialized successfully");
