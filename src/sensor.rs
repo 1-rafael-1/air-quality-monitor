@@ -88,6 +88,10 @@ struct HumidityCalibrator {
     runtime_hours: u32,
     /// Number of samples used in current offset calculation
     offset_sample_count: u32,
+    /// Cached statistical results (`mean_error`, `std_dev`) to avoid redundant computation
+    cached_statistics: Option<(f32, f32)>,
+    /// Flag to track if cached statistics are still valid
+    statistics_cache_valid: bool,
 }
 
 impl HumidityCalibrator {
@@ -98,6 +102,8 @@ impl HumidityCalibrator {
             humidity_offset: 0.0,
             runtime_hours: 0,
             offset_sample_count: 0,
+            cached_statistics: None,
+            statistics_cache_valid: false,
         }
     }
 
@@ -124,9 +130,14 @@ impl HumidityCalibrator {
 
     /// Calculate statistical measures for stored data
     #[allow(clippy::cast_precision_loss)]
-    fn calculate_statistics(&self) -> Option<(f32, f32)> {
+    fn calculate_statistics(&mut self) -> Option<(f32, f32)> {
         if self.data_points.len() < MIN_SAMPLES_FOR_STATISTICAL_ANALYSIS {
             return None;
+        }
+
+        // Return cached result if still valid
+        if self.statistics_cache_valid {
+            return self.cached_statistics;
         }
 
         let mut humidity_errors = Vec::<f32, HUMIDITY_CALIBRATION_SAMPLES>::new();
@@ -146,11 +157,17 @@ impl HumidityCalibrator {
             / humidity_errors.len() as f32;
         let std_dev = sqrt_f32(variance);
 
-        Some((mean_error, std_dev))
+        let result = Some((mean_error, std_dev));
+
+        // Cache the result
+        self.cached_statistics = result;
+        self.statistics_cache_valid = true;
+
+        result
     }
 
     /// Detect if a reading is an outlier
-    fn is_outlier(&self, temperature: f32, raw_humidity: f32) -> bool {
+    fn is_outlier(&mut self, temperature: f32, raw_humidity: f32) -> bool {
         if let Some((mean_error, std_dev)) = self.calculate_statistics() {
             let expected = Self::expected_indoor_humidity(temperature);
             let current_error = raw_humidity - expected;
@@ -199,6 +216,9 @@ impl HumidityCalibrator {
                 info!("Humidity calibration: Removed oldest sample (buffer full)");
             }
             let _ = self.data_points.push(data_point);
+
+            // Invalidate cached statistics since data has changed
+            self.statistics_cache_valid = false;
 
             info!(
                 "Humidity calibration: Added sample {} (total: {})",
