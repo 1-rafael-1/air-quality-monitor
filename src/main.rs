@@ -27,6 +27,7 @@ use static_cell::StaticCell;
 
 mod display;
 mod event;
+mod humidity_calibrator;
 mod orchestrate;
 mod sensor;
 mod system_state;
