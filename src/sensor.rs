@@ -478,7 +478,9 @@ async fn handle_sensor_iteration(
         (Ok(ens160_readings), Ok(aht21_readings)) => {
             send_event(Event::SensorData {
                 temperature: aht21_readings.display_temperature, // Use display temperature for UI
+                raw_temperature: aht21_readings.raw_temperature, // Send raw temperature
                 humidity: aht21_readings.calibrated_humidity,    // Use calibrated humidity for UI
+                raw_humidity: aht21_readings.raw_humidity,       // Send raw humidity
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 co2: ens160_readings.co2 as u16,
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

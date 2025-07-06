@@ -31,6 +31,7 @@ use ssd1306_async::{I2CDisplayInterface, Ssd1306, prelude::*};
 use tinybmp::Bmp;
 
 use crate::{
+    FIRMWARE_VERSION,
     event::{Event, send_event},
     system_state::{BatteryLevel, DisplayMode, SYSTEM_STATE, SensorData},
     watchdog::{TaskId, report_task_failure, report_task_success},
@@ -47,10 +48,14 @@ static TOGGLE_MODE: Duration = Duration::from_secs(10);
 pub enum DisplayCommand {
     /// Update the display with the current sensor data
     SensorData {
-        /// Temperature in degrees Celsius
+        /// Temperature in degrees Celsius (display value with offset)
         temperature: f32,
-        /// Humidity in percentage
+        /// Raw temperature in degrees Celsius (without offset)
+        raw_temperature: f32,
+        /// Humidity in percentage (calibrated)
         humidity: f32,
+        /// Raw humidity in percentage (uncalibrated)
+        raw_humidity: f32,
         /// CO2 level in ppm
         co2: u16,
         /// Ethanol level in ppb
@@ -144,7 +149,9 @@ where
     match command {
         DisplayCommand::SensorData {
             temperature,
+            raw_temperature,
             humidity,
+            raw_humidity,
             co2,
             etoh,
             air_quality,
@@ -152,7 +159,9 @@ where
             // Create the sensor data structure
             let sensor_data = SensorData {
                 temperature,
+                raw_temperature,
                 humidity,
+                raw_humidity,
                 co2,
                 etoh,
                 air_quality,
@@ -247,6 +256,16 @@ where
         let state = SYSTEM_STATE.lock().await;
         settings.draw_battery_icon(&mut display.color_converted(), &state.get_battery_level());
     }
+
+    // Draw firmware version
+    Text::with_baseline(
+        FIRMWARE_VERSION,
+        settings.firmware_version_position,
+        settings.firmware_version_text_style,
+        Baseline::Top,
+    )
+    .draw(&mut display.color_converted())
+    .unwrap_or_default();
 }
 
 /// Loads and holds BMP images and Points for the display
@@ -290,6 +309,10 @@ struct Settings<'a> {
     minmax_max_position: Point,
     /// Style for min/max labels in CO2 history chart
     minmax_text_style: MonoTextStyle<'a, BinaryColor>,
+    /// Position for firmware version text
+    firmware_version_position: Point,
+    /// Style for firmware version text
+    firmware_version_text_style: MonoTextStyle<'a, BinaryColor>,
     /// Bar chart starting Y position
     chart_start_y: i32,
     /// Bar chart height
@@ -350,6 +373,11 @@ impl Settings<'_> {
             minmax_min_position: Point::new(0, 57),
             minmax_max_position: Point::new(64, 57),
             minmax_text_style: MonoTextStyleBuilder::new()
+                .font(&FONT_5X8)
+                .text_color(BinaryColor::On)
+                .build(),
+            firmware_version_position: Point::new(108, 15),
+            firmware_version_text_style: MonoTextStyleBuilder::new()
                 .font(&FONT_5X8)
                 .text_color(BinaryColor::On)
                 .build(),
@@ -474,9 +502,13 @@ impl Settings<'_> {
             .draw(display)
             .unwrap_or_default();
 
-        // Draw the temperature text
-        let mut temp_text: String<16> = String::new();
-        let _ = write!(temp_text, "Temp: {:.1}C", sensor_data.temperature);
+        // Draw the temperature text with raw and adjusted values
+        let mut temp_text: String<32> = String::new();
+        let _ = write!(
+            temp_text,
+            "Temp C r/a: {:.1}/{:.1}",
+            sensor_data.raw_temperature, sensor_data.temperature
+        );
         Text::with_baseline(
             &temp_text,
             self.temperature_position,
@@ -486,9 +518,13 @@ impl Settings<'_> {
         .draw(display)
         .unwrap_or_default();
 
-        // Draw the humidity text
-        let mut humidity_text: String<16> = String::new();
-        let _ = write!(humidity_text, "Humidity: {:.1}%", sensor_data.humidity);
+        // Draw the humidity text with raw and adjusted values
+        let mut humidity_text: String<32> = String::new();
+        let _ = write!(
+            humidity_text,
+            "Hum % r/a: {:.1}/{:.1}",
+            sensor_data.raw_humidity, sensor_data.humidity
+        );
         Text::with_baseline(
             &humidity_text,
             self.humidity_position,

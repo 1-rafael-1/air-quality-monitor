@@ -23,10 +23,14 @@ pub async fn receive_event() -> Event {
 pub enum Event {
     /// Sensor data event containing readings from the sensors
     SensorData {
-        /// Temperature in degrees Celsius
+        /// Temperature in degrees Celsius (display value with offset)
         temperature: f32,
-        /// Humidity in percentage
+        /// Raw temperature in degrees Celsius (without offset)
+        raw_temperature: f32,
+        /// Humidity in percentage (calibrated)
         humidity: f32,
+        /// Raw humidity in percentage (uncalibrated)
+        raw_humidity: f32,
         /// CO2 level in ppm
         co2: u16,
         /// TVOC level in ppb
