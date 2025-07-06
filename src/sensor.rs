@@ -74,8 +74,6 @@ struct HumidityDataPoint {
     temperature: f32,
     /// Raw humidity measurement in percentage
     raw_humidity: f32,
-    /// Simple timestamp in hours since start (for future use)
-    _timestamp_hours: u32,
 }
 
 /// Statistical humidity calibration system
@@ -84,8 +82,6 @@ struct HumidityCalibrator {
     data_points: Vec<HumidityDataPoint, HUMIDITY_CALIBRATION_SAMPLES>,
     /// Current calibration offset
     humidity_offset: f32,
-    /// Runtime hours counter
-    runtime_hours: u32,
     /// Number of samples used in current offset calculation
     offset_sample_count: u32,
     /// Cached statistical results (`mean_error`, `std_dev`) to avoid redundant computation
@@ -100,16 +96,10 @@ impl HumidityCalibrator {
         Self {
             data_points: Vec::new(),
             humidity_offset: 0.0,
-            runtime_hours: 0,
             offset_sample_count: 0,
             cached_statistics: None,
             statistics_cache_valid: false,
         }
-    }
-
-    /// Update runtime hours (call this periodically)
-    const fn update_runtime(&mut self, hours: u32) {
-        self.runtime_hours = hours;
     }
 
     /// Expected indoor humidity based on temperature
@@ -204,7 +194,6 @@ impl HumidityCalibrator {
             let data_point = HumidityDataPoint {
                 temperature,
                 raw_humidity,
-                _timestamp_hours: self.runtime_hours,
             };
 
             let was_buffer_full = self.data_points.len() >= HUMIDITY_CALIBRATION_SAMPLES;
@@ -667,7 +656,6 @@ pub async fn sensor_task(
 
     // Initialize humidity calibrator
     let mut humidity_calibrator = HumidityCalibrator::new();
-    let mut runtime_hours = 0u32;
 
     info!("Sensor task initialized successfully with humidity calibration");
     report_task_success(task_id).await;
@@ -677,13 +665,6 @@ pub async fn sensor_task(
     Timer::after_secs(WARMUP_TIME).await;
 
     loop {
-        // Update runtime hours for calibrator (approximately)
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            runtime_hours += 1; // Increment by 1 hour equivalent per reading cycle
-        }
-        humidity_calibrator.update_runtime(runtime_hours);
-
         // Execute one iteration of the sensor reading loop
         let success = handle_sensor_iteration(
             &mut aht21,
