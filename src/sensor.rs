@@ -37,8 +37,11 @@ const ENS160_MEDIAN_READINGS: usize = 3;
 /// Maximum number of humidity calibration data points to store
 const HUMIDITY_CALIBRATION_SAMPLES: usize = 50;
 
-/// Minimum samples required before applying calibration
-const MIN_CALIBRATION_SAMPLES: usize = 10;
+/// Minimum samples required for basic calibration (start correction immediately)
+const MIN_SAMPLES_FOR_BASIC_CALIBRATION: usize = 1;
+
+/// Minimum samples required for statistical analysis (outlier detection, etc.)
+const MIN_SAMPLES_FOR_STATISTICAL_ANALYSIS: usize = 10;
 
 /// Outlier threshold (standard deviations)
 const OUTLIER_THRESHOLD: f32 = 2.5;
@@ -103,7 +106,7 @@ impl HumidityCalibrator {
         self.runtime_hours = hours;
     }
 
-    /// Expected indoor humidity based on temperature (empirical model)
+    /// Expected indoor humidity based on temperature
     /// Indoor environments typically maintain 30-60% RH, with seasonal variations
     fn expected_indoor_humidity(temperature_c: f32) -> f32 {
         // Empirical model for indoor humidity based on temperature
@@ -122,7 +125,7 @@ impl HumidityCalibrator {
     /// Calculate statistical measures for stored data
     #[allow(clippy::cast_precision_loss)]
     fn calculate_statistics(&self) -> Option<(f32, f32)> {
-        if self.data_points.len() < MIN_CALIBRATION_SAMPLES {
+        if self.data_points.len() < MIN_SAMPLES_FOR_STATISTICAL_ANALYSIS {
             return None;
         }
 
@@ -152,7 +155,16 @@ impl HumidityCalibrator {
             let expected = Self::expected_indoor_humidity(temperature);
             let current_error = raw_humidity - expected;
             let z_score = (current_error - mean_error).abs() / std_dev.max(1.0);
-            z_score > OUTLIER_THRESHOLD
+            let is_outlier = z_score > OUTLIER_THRESHOLD;
+
+            if is_outlier {
+                info!(
+                    "Humidity calibration: Outlier detected - T={}°C, RH={}%, Expected={}%, Error={}, Z-score={} > {}",
+                    temperature, raw_humidity, expected, current_error, z_score, OUTLIER_THRESHOLD
+                );
+            }
+
+            is_outlier
         } else {
             false // Not enough data to determine outliers
         }
@@ -160,20 +172,39 @@ impl HumidityCalibrator {
 
     /// Add a new humidity measurement for calibration
     fn add_measurement(&mut self, temperature: f32, raw_humidity: f32) {
+        let expected = Self::expected_indoor_humidity(temperature);
+        let is_outlier = self.is_outlier(temperature, raw_humidity);
+
+        info!(
+            "Humidity calibration: T={}°C, RH={}%, Expected={}%, Outlier={}",
+            temperature, raw_humidity, expected, is_outlier
+        );
+
         // Don't add obvious outliers to the calibration dataset
-        if !self.is_outlier(temperature, raw_humidity) {
+        if is_outlier {
+            info!("Humidity calibration: Rejected outlier sample");
+        } else {
             let data_point = HumidityDataPoint {
                 temperature,
                 raw_humidity,
                 _timestamp_hours: self.runtime_hours,
             };
 
+            let was_buffer_full = self.data_points.len() >= HUMIDITY_CALIBRATION_SAMPLES;
+
             // Add to circular buffer
-            if self.data_points.len() >= HUMIDITY_CALIBRATION_SAMPLES {
+            if was_buffer_full {
                 // Remove oldest sample
                 self.data_points.remove(0);
+                info!("Humidity calibration: Removed oldest sample (buffer full)");
             }
             let _ = self.data_points.push(data_point);
+
+            info!(
+                "Humidity calibration: Added sample {} (total: {})",
+                self.data_points.len(),
+                if was_buffer_full { "buffer full" } else { "learning" }
+            );
 
             // Update calibration offset with exponential moving average
             self.update_calibration_offset();
@@ -182,23 +213,90 @@ impl HumidityCalibrator {
 
     /// Update the calibration offset based on current data
     fn update_calibration_offset(&mut self) {
-        if let Some((mean_error, _)) = self.calculate_statistics() {
-            // Use exponential moving average to adapt the offset
+        let sample_count = self.data_points.len();
+
+        if sample_count < MIN_SAMPLES_FOR_BASIC_CALIBRATION {
+            info!(
+                "Humidity calibration: Cannot update offset - no samples yet ({}/{})",
+                sample_count, MIN_SAMPLES_FOR_BASIC_CALIBRATION
+            );
+            return;
+        }
+
+        // For fewer than statistical threshold, use simple average
+        if sample_count < MIN_SAMPLES_FOR_STATISTICAL_ANALYSIS {
+            let mut total_error = 0.0;
+            for point in &self.data_points {
+                let expected = Self::expected_indoor_humidity(point.temperature);
+                let error = point.raw_humidity - expected;
+                total_error += error;
+            }
+            #[allow(clippy::cast_precision_loss)]
+            let mean_error = total_error / sample_count as f32;
+
+            let old_offset = self.humidity_offset;
+
             if self.offset_sample_count == 0 {
-                self.humidity_offset = -mean_error; // Negative because we want to correct the error
+                self.humidity_offset = -mean_error;
                 self.offset_sample_count = 1;
+                info!(
+                    "Humidity calibration: Basic initial offset set to {} (simple mean_error={}, samples={})",
+                    self.humidity_offset, mean_error, sample_count
+                );
             } else {
-                // Exponential moving average
+                // Exponential moving average for basic calibration
                 self.humidity_offset = self.humidity_offset * (1.0 - CALIBRATION_LEARNING_RATE)
                     + (-mean_error) * CALIBRATION_LEARNING_RATE;
+
+                let offset_change = self.humidity_offset - old_offset;
+                info!(
+                    "Humidity calibration: Basic offset updated {} -> {} (change: {}, simple mean_error={}, samples={})",
+                    old_offset, self.humidity_offset, offset_change, mean_error, sample_count
+                );
+            }
+        } else {
+            // Use full statistical analysis for outlier detection and better calibration
+            if let Some((mean_error, std_dev)) = self.calculate_statistics() {
+                let old_offset = self.humidity_offset;
+
+                // Use exponential moving average to adapt the offset
+                if self.offset_sample_count == 0 {
+                    self.humidity_offset = -mean_error; // Negative because we want to correct the error
+                    self.offset_sample_count = 1;
+                    info!(
+                        "Humidity calibration: Statistical offset set to {} (mean_error={}, std_dev={})",
+                        self.humidity_offset, mean_error, std_dev
+                    );
+                } else {
+                    // Exponential moving average
+                    self.humidity_offset = self.humidity_offset * (1.0 - CALIBRATION_LEARNING_RATE)
+                        + (-mean_error) * CALIBRATION_LEARNING_RATE;
+
+                    let offset_change = self.humidity_offset - old_offset;
+                    info!(
+                        "Humidity calibration: Statistical offset updated {} -> {} (change: {}, mean_error={}, std_dev={}, samples={})",
+                        old_offset, self.humidity_offset, offset_change, mean_error, std_dev, sample_count
+                    );
+                }
+            } else {
+                info!(
+                    "Humidity calibration: Statistical analysis failed with {} samples",
+                    sample_count
+                );
             }
         }
     }
 
     /// Apply calibration to a humidity reading
     fn calibrate_humidity(&self, _temperature: f32, raw_humidity: f32) -> f32 {
-        if self.data_points.len() < MIN_CALIBRATION_SAMPLES {
-            // Not enough data for calibration, return raw value
+        if self.data_points.len() < MIN_SAMPLES_FOR_BASIC_CALIBRATION {
+            // Not enough data for any calibration, return raw value
+            info!(
+                "Humidity calibration: No samples yet ({}/{}) - returning raw value {}%",
+                self.data_points.len(),
+                MIN_SAMPLES_FOR_BASIC_CALIBRATION,
+                raw_humidity
+            );
             return raw_humidity;
         }
 
@@ -206,12 +304,23 @@ impl HumidityCalibrator {
         let calibrated = raw_humidity + self.humidity_offset;
 
         // Sanity check: clamp to physically reasonable humidity range
-        calibrated.clamp(0.0, 100.0)
+        let final_value = calibrated.clamp(0.0, 100.0);
+
+        let was_clamped = (calibrated - final_value).abs() > f32::EPSILON;
+        info!(
+            "Humidity calibration: Applied offset {} to {}% -> {}%{}",
+            self.humidity_offset,
+            raw_humidity,
+            final_value,
+            if was_clamped { " (clamped)" } else { "" }
+        );
+
+        final_value
     }
 
     /// Get calibration status information
     fn get_calibration_info(&self) -> (bool, f32, usize) {
-        let is_calibrated = self.data_points.len() >= MIN_CALIBRATION_SAMPLES;
+        let is_calibrated = self.data_points.len() >= MIN_SAMPLES_FOR_BASIC_CALIBRATION;
         (is_calibrated, self.humidity_offset, self.data_points.len())
     }
 }
@@ -291,7 +400,14 @@ async fn read_aht21(
         calibrated_humidity: calibrated_rh,
     };
 
-    let (is_calibrated, offset, sample_count) = humidity_calibrator.get_calibration_info();
+    let (_is_calibrated, offset, sample_count) = humidity_calibrator.get_calibration_info();
+    let calibration_status = if sample_count == 0 {
+        "NONE"
+    } else if sample_count < MIN_SAMPLES_FOR_STATISTICAL_ANALYSIS {
+        "BASIC"
+    } else {
+        "STATISTICAL"
+    };
 
     info!(
         "Temperature: {}°C (raw: {}°C), Humidity: {}% -> {}% (raw->cal), Calibration: {} (offset: {}, samples: {})",
@@ -299,7 +415,7 @@ async fn read_aht21(
         readings.raw_temperature,
         readings.raw_humidity,
         readings.calibrated_humidity,
-        if is_calibrated { "ACTIVE" } else { "LEARNING" },
+        calibration_status,
         offset,
         sample_count
     );
