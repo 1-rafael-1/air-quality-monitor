@@ -33,10 +33,14 @@ pub struct SystemState {
 /// Holds the sensor data to be displayed
 #[derive(Clone)]
 pub struct SensorData {
-    /// Temperature in degrees Celsius
+    /// Temperature in degrees Celsius (display value with offset)
     pub temperature: f32,
-    /// Humidity in percentage
+    /// Raw temperature in degrees Celsius (without offset)
+    pub raw_temperature: f32,
+    /// Humidity in percentage (calibrated)
     pub humidity: f32,
+    /// Raw humidity in percentage (uncalibrated)
+    pub raw_humidity: f32,
     /// CO2 level in ppm
     pub co2: u16,
     /// Ethanol level in ppb

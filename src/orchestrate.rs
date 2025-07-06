@@ -21,7 +21,9 @@ async fn process_event(event: Event) {
     match event {
         Event::SensorData {
             temperature,
+            raw_temperature,
             humidity,
+            raw_humidity,
             co2,
             etoh,
             air_quality,
@@ -29,7 +31,9 @@ async fn process_event(event: Event) {
             // Create sensor data structure
             let sensor_data = SensorData {
                 temperature,
+                raw_temperature,
                 humidity,
+                raw_humidity,
                 co2,
                 etoh,
                 air_quality,
@@ -45,7 +49,9 @@ async fn process_event(event: Event) {
             // Send display command
             send_display_command(DisplayCommand::SensorData {
                 temperature,
+                raw_temperature,
                 humidity,
+                raw_humidity,
                 co2,
                 etoh,
                 air_quality,

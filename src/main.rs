@@ -5,6 +5,9 @@
 #![no_std]
 #![no_main]
 
+/// Firmware version string
+pub const FIRMWARE_VERSION: &str = concat!("v", env!("CARGO_PKG_VERSION"));
+
 use defmt_rtt as _;
 use embassy_embedded_hal::shared_bus::asynch::i2c::I2cDevice;
 use embassy_executor::Spawner;
@@ -24,6 +27,7 @@ use static_cell::StaticCell;
 
 mod display;
 mod event;
+mod humidity_calibrator;
 mod orchestrate;
 mod sensor;
 mod system_state;

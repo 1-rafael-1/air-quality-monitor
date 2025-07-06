@@ -19,6 +19,7 @@ use panic_probe as _;
 
 use crate::{
     event::{Event, send_event},
+    humidity_calibrator::HumidityCalibrator,
     watchdog::{TaskId, report_task_failure, report_task_success},
 };
 
@@ -39,11 +40,11 @@ async fn initialize_aht21(
     aht21_device: I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>,
 ) -> Option<Aht20<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>> {
     let mut aht21 = Aht20::new(aht21_device, Delay).await.ok()?;
+    Timer::after_millis(100).await;
     info!("calibrate aht21");
     aht21.calibrate().await.ok()?;
     info!("AHT21 calibration successful");
     Timer::after_millis(1000).await;
-    info!("done calibrating");
     Some(aht21)
 }
 
@@ -67,10 +68,14 @@ async fn initialize_ens160(
 
 /// Struct to hold AHT21 sensor readings
 struct Aht21Readings {
-    /// Temperature in degrees Celsius
-    temperature: f32,
-    /// Humidity in percentage
-    humidity: f32,
+    /// Raw temperature in degrees Celsius (for ENS160 compensation)
+    raw_temperature: f32,
+    /// Display temperature in degrees Celsius (with offset applied)
+    display_temperature: f32,
+    /// Raw humidity in percentage (uncalibrated)
+    raw_humidity: f32,
+    /// Calibrated humidity in percentage
+    calibrated_humidity: f32,
 }
 
 /// Struct to hold ENS160 sensor readings
@@ -86,18 +91,50 @@ struct Ens160Readings {
 /// Read data from AHT21 sensor
 async fn read_aht21(
     aht21: &mut Aht20<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
+    humidity_calibrator: &mut HumidityCalibrator,
 ) -> Result<Aht21Readings, &'static str> {
     let (hum, temp) = aht21.read().await.map_err(|_| "Failed to read AHT21 sensor")?;
-    let (temp, rh) = (temp.celsius() + AHT21_TEMPERATURE_OFFSET, hum.rh());
+    let raw_temp = temp.celsius();
+    let raw_rh = hum.rh();
+
+    // Add measurement to calibrator for learning (this also detects rapid changes)
+    humidity_calibrator.add_measurement(raw_temp, raw_rh);
+
+    // Apply calibration (this preserves rapid changes while applying offset corrections)
+    let calibrated_rh = humidity_calibrator.calibrate_humidity(raw_temp, raw_rh);
 
     let readings = Aht21Readings {
-        temperature: temp,
-        humidity: rh,
+        raw_temperature: raw_temp,
+        display_temperature: raw_temp + AHT21_TEMPERATURE_OFFSET,
+        raw_humidity: raw_rh,
+        calibrated_humidity: calibrated_rh,
+    };
+
+    let (is_calibrated, baseline_offset, statistical_offset, sample_count, in_rapid_change, long_term_count) =
+        humidity_calibrator.get_calibration_info();
+    let calibration_status = if !is_calibrated {
+        "ESTABLISHING_BASELINE"
+    } else if in_rapid_change {
+        if humidity_calibrator.baseline_shifted {
+            "BASELINE_SHIFT"
+        } else {
+            "RAPID_CHANGE"
+        }
+    } else {
+        "HYBRID_DRIFT_CORRECTION"
     };
 
     info!(
-        "Temperature: {}°C, Humidity: {}%",
-        readings.temperature, readings.humidity
+        "Temperature: {}°C (raw: {}°C), Humidity: {}% -> {}% (raw->cal), Calibration: {} (baseline offset: {}, statistical offset: {}, samples: {}, long-term count: {})",
+        readings.display_temperature,
+        readings.raw_temperature,
+        readings.raw_humidity,
+        readings.calibrated_humidity,
+        calibration_status,
+        baseline_offset,
+        statistical_offset,
+        sample_count,
+        long_term_count
     );
 
     Ok(readings)
@@ -176,12 +213,8 @@ async fn read_ens160(
     Ok(readings)
 }
 
-// Note: ENS160 operates in continuous Standard mode for reliable measurements.
-// Sleep/wake cycles have been removed as they disrupt sensor stability and calibration,
-// leading to unreliable readings after wake cycles. Continuous operation provides
-// consistent and accurate air quality measurements.
-
 /// Set temperature and humidity compensation on ENS160 sensor
+/// Uses raw temperature (without offset correction) for accurate sensor compensation
 async fn set_ens160_compensation(
     ens160: &mut Ens160<I2cDevice<'static, NoopRawMutex, I2c<'static, I2C0, Async>>, Delay>,
     temp: f32,
@@ -251,12 +284,13 @@ async fn handle_sensor_iteration(
     ens160_int: &mut Input<'static>,
     prev_temp: &mut f32,
     prev_humidity: &mut f32,
+    humidity_calibrator: &mut HumidityCalibrator,
 ) -> bool {
     // Read AHT21 data first to get current environmental conditions
-    let aht21_result = read_aht21(aht21).await;
+    let aht21_result = read_aht21(aht21, humidity_calibrator).await;
     if let Ok(ref aht21_readings) = aht21_result {
-        *prev_temp = aht21_readings.temperature;
-        *prev_humidity = aht21_readings.humidity;
+        *prev_temp = aht21_readings.raw_temperature; // Use raw temperature for ENS160 compensation
+        *prev_humidity = aht21_readings.calibrated_humidity; // Use calibrated humidity
     }
 
     // Set temperature and humidity compensation using latest readings
@@ -271,8 +305,10 @@ async fn handle_sensor_iteration(
     match (ens160_result, aht21_result) {
         (Ok(ens160_readings), Ok(aht21_readings)) => {
             send_event(Event::SensorData {
-                temperature: aht21_readings.temperature,
-                humidity: aht21_readings.humidity,
+                temperature: aht21_readings.display_temperature, // Use display temperature for UI
+                raw_temperature: aht21_readings.raw_temperature, // Send raw temperature
+                humidity: aht21_readings.calibrated_humidity,    // Use calibrated humidity for UI
+                raw_humidity: aht21_readings.raw_humidity,       // Send raw humidity
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
                 co2: ens160_readings.co2 as u16,
                 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -318,10 +354,13 @@ pub async fn sensor_task(
     };
 
     // Store previous AHT21 readings for ENS160 compensation
-    let mut prev_temp = 25.0; // Default temperature
+    let mut prev_temp = 25.0; // Default raw temperature (without offset)
     let mut prev_humidity = 50.0; // Default humidity
 
-    info!("Sensor task initialized successfully");
+    // Initialize humidity calibrator
+    let mut humidity_calibrator = HumidityCalibrator::new();
+
+    info!("Sensor task initialized successfully with humidity calibration");
     report_task_success(task_id).await;
 
     // Wait for ENS160 warmup period before starting readings
@@ -336,6 +375,7 @@ pub async fn sensor_task(
             &mut ens160_int,
             &mut prev_temp,
             &mut prev_humidity,
+            &mut humidity_calibrator,
         )
         .await;
 
